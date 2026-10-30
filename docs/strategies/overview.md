@@ -1,6 +1,6 @@
 # Strategy Guide
 
-Implementation scope: single-condition buys YES+NO; rebalancing buys an operator-verified exhaustive group; combinatorial enumerates equal-quantity YES/NO baskets over 2–8 binary markets. The live path uses guaranteed resolution payouts and executable asks, not Frank–Wolfe distance. Relationship inference is advisory. Mathematical payoff coverage does not guarantee that every leg fills or that profitable opportunities exist. See [configuration](../configuration.md#strategies) and [verification](../../CORRECTNESS_REVIEW.md).
+Implementation scope: single-condition buys YES+NO; rebalancing buys an operator-verified exhaustive group; combinatorial enumerates equal-quantity YES/NO baskets over 2–8 binary markets. The live path uses guaranteed resolution payouts and executable asks, not Frank–Wolfe distance. Relationship inference is advisory. Mathematical payoff coverage does not guarantee that every leg fills or that profitable opportunities exist. See [configuration](../configuration.md#strategies) and [testing](../testing.md).
 
 
 ## What is Prediction Market Arbitrage?

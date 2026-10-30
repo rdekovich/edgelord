@@ -14,7 +14,7 @@
 
 ---
 
-> Edgelord detects and executes bounded arbitrage baskets. All three strategies have deterministic payoff tests; this is not a claim of profitability or unattended live readiness. Execution currently supports fee-free, immediate-execution binary $1 contracts on Polygon with an EOA wallet. Multi-market strategies require operator-reviewed resolution relationships. See [verification and remaining limits](CORRECTNESS_REVIEW.md) before enabling trading.
+> Edgelord detects and executes bounded arbitrage baskets. All three strategies have deterministic payoff tests; this is not a claim of profitability or unattended live readiness. Execution currently supports fee-free, immediate-execution binary $1 contracts on Polygon with an EOA wallet. Multi-market strategies require operator-reviewed resolution relationships. See [testing and verification limits](docs/testing.md) before enabling trading.
 
 ---
 
