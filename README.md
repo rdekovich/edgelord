@@ -14,7 +14,7 @@
 
 ---
 
-> Edgelord detects and executes bounded arbitrage baskets. All three strategies have deterministic payoff tests; this is not a claim of profitability or unattended live readiness. Execution currently supports fee-free, immediate-execution binary $1 contracts on Polygon with an EOA wallet. Multi-market strategies require operator-reviewed resolution relationships. See [testing and verification limits](docs/testing.md) before enabling trading.
+> Edgelord detects and executes bounded arbitrage baskets. All three strategies have deterministic payoff tests; this is not a claim of profitability or unattended live readiness. The International execution adapter still depends on the [archived V1 SDK](https://github.com/Polymarket/rs-clob-client), which upstream marks nonfunctional; live trading requires migration and verification against V2. The optional US integration currently provides read-only protocol checks, not trading. Multi-market strategies require operator-reviewed resolution relationships. See [testing and verification limits](docs/testing.md) before enabling trading.
 
 ---
 
@@ -51,6 +51,20 @@ $ cp config.toml.example config.toml
 $ edgelord check config --config config.toml
 $ edgelord run --config config.toml --dry-run
 ```
+
+## Polymarket US
+
+The optional Rust US boundary uses the [official US API contracts](https://github.com/Polymarket/polymarket-us-typescript). It provides signed read-only account requests and public market/book access. It is **not connected to `edgelord run`** and cannot submit orders. Changing the International API URL to a US URL does not enable US support.
+
+From this checkout, check public connectivity without credentials:
+
+```sh
+cargo run --locked --features polymarket-us --example polymarket_us_check
+```
+
+To also inspect balances, open orders and paginated positions, provide `POLYMARKET_US_KEY_ID` and `POLYMARKET_US_SECRET_KEY` through your secret manager, then append `-- --account`. These are US developer portal credentials, separate from Polygon wallet keys and crates.io publishing tokens. The probe prints account balances to your terminal but never prints credentials.
+
+US trading integration still requires signed-position accounting, collected fees, order reconciliation and a verified private data stream. US has one YES instrument per market; buying YES and selling YES does not reproduce the International two-token single-condition basket. Market rebalancing and combinatorial strategies need venue-specific execution validation before activation.
 
 ## Strategies
 
