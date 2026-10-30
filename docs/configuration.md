@@ -25,8 +25,8 @@ exchange = "polymarket"
 ```toml
 [exchange_config]
 type = "polymarket"
-environment = "testnet"      # testnet | mainnet
-chain_id = 80002              # 80002 testnet, 137 mainnet
+environment = "mainnet"     # Public feed; use dry_run=true for observation
+chain_id = 137               # Live execution supports Polygon only
 ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 api_url = "https://clob.polymarket.com"
 ```
@@ -89,9 +89,17 @@ CLI overrides: `--max-connections`, `--subs-per-connection`, `--connection-ttl`
 
 ## Strategies
 
+The safe example enables only single-condition detection with `dry_run = true`. To enable all three, replace the strategy section with the following and substitute real condition IDs whose resolution rules you have reviewed:
+
 ```toml
 [strategies]
-enabled = ["single_condition", "market_rebalancing"]
+enabled = ["single_condition", "market_rebalancing", "combinatorial"]
+exhaustive_groups = [["condition-a", "condition-b", "condition-c"]]
+
+[[strategies.verified_relations]]
+type = "implies"
+if_yes = "condition-d"
+then_yes = "condition-e"
 
 [strategies.single_condition]
 min_edge = 0.05
@@ -103,13 +111,16 @@ min_profit = 1.00
 max_outcomes = 10
 
 [strategies.combinatorial]
-enabled = false
-max_iterations = 20
-tolerance = 0.0001
 gap_threshold = 0.02
 ```
 
-CLI overrides: `--strategies`, `--min-edge`, `--min-profit`
+`exhaustive_groups` must contain at least three distinct binary conditions covering every possible resolution, with exactly one YES winner. At-most-one is insufficient. All members must survive discovery and filtering or startup fails. These groups create synthetic event markets while retaining individual binary markets.
+
+`verified_relations` supports the serialized `RelationKind` variants (`implies`, `mutually_exclusive`, `exactly_one`, `linear`). Constraints must describe settlement outcomes, not price correlations. Combinatorial execution enumerates 2–8 binary markets; missing books, contradictory constraints and larger clusters do not produce trades. LLM candidates are kept outside the execution relation cache. `max_iterations` and `tolerance` are retained for research API compatibility and do not tune basket execution.
+
+Live startup refuses enabled rebalancing without groups or combinatorial trading without verified relations. The software cannot establish that an operator's asserted relationship is true; review the actual resolution text, deadlines, cancellation rules and payout denomination.
+
+CLI overrides: `--strategies`, `--min-edge`, `--min-profit`.
 
 ## Risk Management
 

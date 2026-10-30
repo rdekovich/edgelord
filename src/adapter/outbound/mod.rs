@@ -7,3 +7,5 @@ pub mod notifier;
 pub mod polymarket;
 pub mod solver;
 pub mod sqlite;
+
+pub mod journal;

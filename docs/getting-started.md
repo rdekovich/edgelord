@@ -1,93 +1,20 @@
-# Getting Started
+# Getting started
 
-## Prerequisites
+The current correctness fixes are unreleased. Build this checkout on Linux or macOS with Rust 1.93+, CMake, a C++ compiler and libclang:
 
-- [Rust toolchain](https://rustup.rs/)
-- Polygon USDC + MATIC for live trading
-
-## Installation
-
-```console
-$ cargo install edgelord
+```sh
+cargo install --locked --path .
+cp config.toml.example config.toml
+edgelord check config --config config.toml
+edgelord run --config config.toml --dry-run
 ```
 
-## Configuration
+The example uses public Polygon market data and disables order submission. Setting `--testnet` does not turn Polymarket's production endpoints into a paper exchange; live execution accepts only chain 137. Do not treat successful config or health checks as proof of safe trading.
 
-```console
-$ edgelord init config.toml
-```
+Start with no wallet secret. Review [strategy configuration](configuration.md#strategies), [testing](testing.md), and [operations](deployment/operations.md) before considering live execution. All three strategies are supported within the documented bounds; multi-market strategies require verified groups and relationships.
 
-The wizard configures network, strategies, and risk limits.
+`WALLET_PRIVATE_KEY` enables wallet-backed execution only when dry-run is disabled. Optional secrets are `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and the selected LLM provider's API key. Keep credentials out of source control. Use a dedicated EOA wallet; existing or externally modified inventory fails reconciliation.
 
-## Secrets
+Use `edgelord --help` and each command's `--help` for supported flags. SQLite reports are available through `edgelord status --db edgelord.db` and `edgelord statistics today --db edgelord.db`. Preserve the accompanying execution journal with the database.
 
-**With [dugout](https://crates.io/crates/dugout)** (recommended—encrypted at rest):
-
-```console
-$ cargo install dugout
-$ dugout setup && dugout init
-$ dugout set WALLET_PRIVATE_KEY
-$ dugout run -- edgelord run --config config.toml
-```
-
-**With environment variables:**
-
-```console
-$ export WALLET_PRIVATE_KEY=<your-key>
-$ edgelord run --config config.toml
-```
-
-Optional secrets: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `ANTHROPIC_API_KEY`
-
-## Validation
-
-```console
-$ edgelord check config --config config.toml
-$ edgelord check health --config config.toml
-$ edgelord check live --config config.toml    # Needs wallet secret
-```
-
-## Running
-
-```console
-$ edgelord run --config config.toml
-```
-
-### CLI Flags
-
-| Flag | Description |
-|------|-------------|
-| `--testnet` | Run on Amoy testnet |
-| `--mainnet` | Run on Polygon mainnet |
-| `--dry-run` | Detect opportunities without executing |
-| `--no-banner` | Suppress startup banner |
-| `--json-logs` | Structured JSON logging |
-| `--max-exposure N` | Override max total exposure |
-
-### Production Example
-
-```console
-$ dugout run -- edgelord run \
-    --mainnet \
-    --no-banner \
-    --json-logs \
-    --max-exposure 5000
-```
-
-## Monitoring
-
-```console
-$ edgelord status --db edgelord.db
-$ edgelord statistics today --db edgelord.db
-$ edgelord statistics week --db edgelord.db
-```
-
-## Mainnet Checklist
-
-1. Run stable dry-run sessions on testnet
-2. Set `environment = "mainnet"` and `chain_id = 137`
-3. Re-run `check health` and `check live`
-4. Start with conservative risk limits
-5. Monitor first trades closely
-
-See [Deployment](deployment/README.md) for production operations.
+For Homebrew, standalone archives and crates.io publication status, see [installation operations](deployment/operations.md#releasing-and-installing).

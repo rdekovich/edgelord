@@ -339,6 +339,16 @@ impl MarketRegistry {
         self.token_to_market.get(token_id)
     }
 
+    /// All markets affected by a token, including configured event groups.
+    pub fn get_all_by_token<'a>(
+        &'a self,
+        token_id: &'a TokenId,
+    ) -> impl Iterator<Item = &'a Market> {
+        self.markets
+            .iter()
+            .filter(move |market| market.outcomes().iter().any(|o| o.token_id() == token_id))
+    }
+
     /// Returns all registered markets.
     #[must_use]
     pub fn markets(&self) -> &[Market] {

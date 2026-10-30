@@ -20,8 +20,20 @@ use super::solver::build_projection_solver;
 /// and skipped.
 pub fn build_strategy_registry(
     config: &Config,
-    cluster_cache: Arc<ClusterCache>,
+    _cluster_cache: Arc<ClusterCache>,
 ) -> StrategyRegistry {
+    let cluster_cache = Arc::new(ClusterCache::new(chrono::Duration::days(365)));
+    let relations = config
+        .strategies
+        .verified_relations
+        .iter()
+        .cloned()
+        .map(|kind| {
+            crate::domain::relation::Relation::new(kind, 1.0, "Operator-verified configuration")
+                .with_ttl(chrono::Duration::days(365))
+        })
+        .collect();
+    cluster_cache.put_relations(relations);
     let mut builder = StrategyRegistry::builder()
         .cluster_cache(cluster_cache)
         .projection_solver(build_projection_solver());
@@ -36,7 +48,9 @@ pub fn build_strategy_registry(
                 builder = builder.market_rebalancing(config.strategies.market_rebalancing.clone());
             }
             "combinatorial" => {
-                builder = builder.combinatorial(config.strategies.combinatorial.clone());
+                let mut strategy_config = config.strategies.combinatorial.clone();
+                strategy_config.enabled = true;
+                builder = builder.combinatorial(strategy_config);
             }
             unknown => {
                 warn!(

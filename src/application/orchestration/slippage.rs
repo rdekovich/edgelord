@@ -20,7 +20,11 @@ pub(crate) fn get_max_slippage(opportunity: &Opportunity, cache: &BookCache) -> 
 
     for leg in opportunity.legs() {
         let book = cache.get(leg.token_id())?;
-        let current_price = book.best_ask()?.price();
+        let ask = book.best_ask()?;
+        if ask.size() < opportunity.volume() {
+            return None;
+        }
+        let current_price = ask.price();
         let expected_price = leg.ask_price();
 
         if expected_price == Decimal::ZERO {

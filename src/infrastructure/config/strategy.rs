@@ -21,9 +21,18 @@ pub struct StrategiesConfig {
     #[serde(default = "default_enabled_strategies")]
     pub enabled: Vec<String>,
 
+    /// Operator-verified resolution relationships. LLM guesses are not execution authority.
+    #[serde(default)]
+    pub verified_relations: Vec<crate::domain::relation::RelationKind>,
+
+    /// Complete, mutually exclusive and exhaustive event groups (condition IDs).
+    /// All members must be discovered; partial groups fail startup.
+    #[serde(default)]
+    pub exhaustive_groups: Vec<Vec<crate::domain::id::MarketId>>,
+
     /// Single-condition strategy configuration.
     ///
-    /// Detects simple YES+NO >= 1 arbitrage opportunities.
+    /// Detects simple YES+NO < 1 arbitrage opportunities.
     #[serde(default)]
     pub single_condition: SingleConditionConfig,
 
@@ -35,8 +44,7 @@ pub struct StrategiesConfig {
 
     /// Combinatorial strategy configuration.
     ///
-    /// Uses Frank-Wolfe optimization and ILP for complex multi-market
-    /// arbitrage detection.
+    /// Enumerates baskets against operator-verified resolution constraints.
     #[serde(default)]
     pub combinatorial: CombinatorialConfig,
 }

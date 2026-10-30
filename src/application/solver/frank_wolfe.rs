@@ -103,12 +103,94 @@ impl FrankWolfe {
             });
         }
 
+        if n <= 12
+            && ilp_problem.lp.bounds.len() == n
+            && ilp_problem
+                .lp
+                .constraints
+                .iter()
+                .all(|c| c.coefficients.len() == n)
+        {
+            use crate::domain::constraint::{Constraint, ConstraintSense, VariableBounds};
+            let vertices: Vec<Vec<Decimal>> = (0..(1usize << n))
+                .map(|mask| {
+                    (0..n)
+                        .map(|i| {
+                            if mask & (1 << i) != 0 {
+                                Decimal::ONE
+                            } else {
+                                Decimal::ZERO
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .filter(|point| {
+                    ilp_problem.lp.constraints.iter().all(|c| {
+                        let lhs: Decimal =
+                            c.coefficients.iter().zip(point).map(|(a, b)| *a * *b).sum();
+                        match c.sense {
+                            ConstraintSense::LessEqual => lhs <= c.rhs,
+                            ConstraintSense::GreaterEqual => lhs >= c.rhs,
+                            ConstraintSense::Equal => lhs == c.rhs,
+                        }
+                    }) && ilp_problem.lp.bounds.iter().zip(point).all(|(bound, x)| {
+                        bound.lower.is_none_or(|v| *x >= v) && bound.upper.is_none_or(|v| *x <= v)
+                    })
+                })
+                .collect();
+            if !vertices.is_empty() {
+                let mut constraints = vec![Constraint::eq(
+                    vec![Decimal::ONE; vertices.len()],
+                    Decimal::ONE,
+                )];
+                constraints
+                    .extend((0..n).map(|i| {
+                        Constraint::eq(vertices.iter().map(|v| v[i]).collect(), theta[i])
+                    }));
+                let membership = solver.solve_lp(&LpProblem {
+                    objective: vec![Decimal::ZERO; vertices.len()],
+                    constraints,
+                    bounds: vec![VariableBounds::binary(); vertices.len()],
+                })?;
+                if membership.status == SolutionStatus::Optimal
+                    && membership.values.len() == vertices.len()
+                    && (membership.values.iter().sum::<Decimal>() - Decimal::ONE).abs()
+                        < Decimal::new(1, 8)
+                    && membership.values.iter().all(|v| *v >= Decimal::ZERO)
+                    && (0..n).all(|i| {
+                        (vertices
+                            .iter()
+                            .zip(&membership.values)
+                            .map(|(v, w)| v[i] * *w)
+                            .sum::<Decimal>()
+                            - theta[i])
+                            .abs()
+                            < Decimal::new(1, 8)
+                    })
+                {
+                    return Ok(FrankWolfeResult {
+                        mu: theta.to_vec(),
+                        gap: Decimal::ZERO,
+                        iterations: 0,
+                        converged: true,
+                    });
+                }
+            }
+        }
+
         // ========================================================================
         // STEP 1: Initialize with current prices
         // ========================================================================
         // Start with mu = theta. If theta is already in M, we converge immediately.
         // If theta is outside M, the algorithm will iteratively move mu toward M.
-        let mut mu = theta.to_vec();
+        let initial = solver.solve_ilp(ilp_problem)?;
+        if initial.status != SolutionStatus::Optimal || initial.values.len() != n {
+            return Err(crate::error::Error::Parse(
+                "Projection has no feasible initial point".into(),
+            ));
+        }
+        let mut mu = initial.values;
+
         let mut iterations = 0;
         let mut gap = Decimal::MAX;
 
@@ -177,7 +259,26 @@ impl FrankWolfe {
             // The step size gamma ∈ [0,1] determines how far to move. We use the
             // classic 2/(t+2) schedule which guarantees O(1/t) convergence rate.
             // For LMSR, exact line search is complex, so this schedule works well.
-            let gamma = Decimal::TWO / Decimal::from(iterations + 2);
+            let mut low = Decimal::ZERO;
+            let mut high = Decimal::ONE;
+            for _ in 0..48 {
+                let left = low + (high - low) / Decimal::from(3);
+                let right = high - (high - low) / Decimal::from(3);
+                let value = |step: Decimal| {
+                    let point: Vec<_> = mu
+                        .iter()
+                        .zip(s)
+                        .map(|(m, v)| *m + step * (*v - *m))
+                        .collect();
+                    bregman_divergence(&point, theta)
+                };
+                if value(left) < value(right) {
+                    high = right;
+                } else {
+                    low = left;
+                }
+            }
+            let gamma = (low + high) / Decimal::TWO;
 
             let one_minus_gamma = Decimal::ONE - gamma;
             for i in 0..n {

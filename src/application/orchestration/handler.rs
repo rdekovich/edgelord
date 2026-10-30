@@ -529,7 +529,17 @@ mod tests {
     #[test]
     fn handle_market_event_settles_positions() {
         let cache = Arc::new(BookCache::new());
-        let registry = Arc::new(MarketRegistry::new());
+        let mut registry = MarketRegistry::new();
+        registry.add(crate::domain::market::Market::new(
+            MarketId::from("settled-market"),
+            "Settled?",
+            vec![
+                crate::domain::market::Outcome::new(TokenId::from("yes-1"), "Yes"),
+                crate::domain::market::Outcome::new(TokenId::from("no-1"), "No"),
+            ],
+            dec!(1),
+        ));
+        let registry = Arc::new(registry);
         let strategies = StrategyRegistry::new();
         let state = Arc::new(AppState::default());
         let notifiers = Arc::new(NotifierRegistry::new());

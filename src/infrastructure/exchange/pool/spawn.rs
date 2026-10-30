@@ -34,7 +34,7 @@ fn spawn_connection(
     event_tx: mpsc::Sender<MarketEvent>,
     connection_id: u64,
     last_event_at: Arc<AtomicU64>,
-    counters: Arc<SharedCounters>,
+    _counters: Arc<SharedCounters>,
 ) -> tokio::task::JoinHandle<()> {
     let stream = factory();
     let mut stream = ReconnectingDataStream::new(stream, reconnection_config);
@@ -62,16 +62,9 @@ fn spawn_connection(
             match stream.next_event().await {
                 Some(event) => {
                     last_event_at.store(epoch_millis(), Ordering::Relaxed);
-                    match event_tx.try_send(event) {
-                        Ok(()) => {}
-                        Err(mpsc::error::TrySendError::Full(_)) => {
-                            counters.events_dropped.fetch_add(1, Ordering::Relaxed);
-                            warn!(connection_id, "Event channel full — dropping event");
-                        }
-                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                            debug!(connection_id, "Channel closed, terminating");
-                            break;
-                        }
+                    if event_tx.send(event).await.is_err() {
+                        debug!(connection_id, "Channel closed, terminating");
+                        break;
                     }
                 }
                 None => {

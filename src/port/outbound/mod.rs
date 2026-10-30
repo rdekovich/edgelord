@@ -29,3 +29,5 @@ pub mod report;
 pub mod solver;
 pub mod stats;
 pub mod store;
+
+pub mod journal;

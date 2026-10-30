@@ -4,6 +4,9 @@
 //! Implements the [`StatsRecorder`](crate::port::outbound::stats::StatsRecorder)
 //! trait for the statistics recording port.
 
+// Diesel QueryableByName emits redundant field names in generated impls.
+#![allow(clippy::redundant_field_names)]
+
 use std::sync::Arc;
 
 use chrono::{NaiveDate, Utc};
@@ -46,6 +49,8 @@ pub struct SqliteRecorder {
     pool: Pool<ConnectionManager<SqliteConnection>>,
 }
 
+// Diesel generates a redundant field initializer on recent compilers.
+#[allow(clippy::redundant_field_names)]
 #[derive(QueryableByName)]
 struct LastInsertRowId {
     #[diesel(sql_type = diesel::sql_types::Integer)]
@@ -186,46 +191,44 @@ impl SqliteRecorder {
             }
         };
 
-        let trade: Option<TradeRow> = trades::table
-            .filter(trades::id.eq(event.trade_id))
-            .first(&mut conn)
-            .ok();
-
-        let strategy = trade
-            .as_ref()
-            .map(|t| t.strategy.clone())
-            .unwrap_or_default();
-        let profit = decimal_to_f32(event.realized_profit);
-        let is_win = event.realized_profit > Decimal::ZERO;
-
-        let result = diesel::update(trades::table.filter(trades::id.eq(event.trade_id)))
-            .set((
-                trades::realized_profit.eq(Some(profit)),
-                trades::status.eq("closed"),
-                trades::closed_at.eq(Some(&now)),
-                trades::close_reason.eq(Some(&event.reason)),
-            ))
-            .execute(&mut conn);
-
+        let result = conn.transaction::<(), diesel::result::Error, _>(|conn| {
+            let trade: TradeRow = trades::table
+                .filter(trades::id.eq(event.trade_id))
+                .first(conn)?;
+            // Settlement replay may repeat after a crash. Close and aggregates
+            // must commit together, and each trade contributes exactly once.
+            if trade.status == "closed" {
+                return Ok(());
+            }
+            let profit = decimal_to_f32(event.realized_profit);
+            let is_win = event.realized_profit > Decimal::ZERO;
+            diesel::update(trades::table.filter(trades::id.eq(event.trade_id)))
+                .set((
+                    trades::realized_profit.eq(Some(profit)),
+                    trades::status.eq("closed"),
+                    trades::closed_at.eq(Some(&now)),
+                    trades::close_reason.eq(Some(&event.reason)),
+                ))
+                .execute(conn)?;
+            self.update_daily_stats_with_conn(conn, &today, &trade.strategy, |daily, strat| {
+                daily.trades_closed += 1;
+                strat.trades_closed += 1;
+                if is_win {
+                    daily.profit_realized += profit;
+                    daily.win_count += 1;
+                    strat.profit_realized += profit;
+                    strat.win_count += 1;
+                } else {
+                    daily.loss_realized += profit.abs();
+                    daily.loss_count += 1;
+                    strat.loss_count += 1;
+                }
+            })
+        });
         if let Err(e) = result {
-            warn!(error = %e, "Failed to record trade close");
+            warn!(error = %e, "Trade-close transaction failed");
             return;
         }
-
-        self.update_daily_stats(&today, &strategy, |daily, strat| {
-            daily.trades_closed += 1;
-            strat.trades_closed += 1;
-            if is_win {
-                daily.profit_realized += profit;
-                daily.win_count += 1;
-                strat.profit_realized += profit;
-                strat.win_count += 1;
-            } else {
-                daily.loss_realized += profit.abs();
-                daily.loss_count += 1;
-                strat.loss_count += 1;
-            }
-        });
 
         debug!(trade_id = event.trade_id, profit = %event.realized_profit, "Recorded trade close");
     }
@@ -708,6 +711,7 @@ mod tests {
 
         let close = make_trade_close(trade_id, dec!(10.00));
         recorder.record_trade_close(&close);
+        recorder.record_trade_close(&close); // Restart replay must be idempotent.
 
         let summary = recorder.get_today();
 
@@ -729,6 +733,7 @@ mod tests {
 
         let close = make_trade_close(trade_id, dec!(-5.00));
         recorder.record_trade_close(&close);
+        recorder.record_trade_close(&close); // Restart replay must be idempotent.
 
         let summary = recorder.get_today();
 

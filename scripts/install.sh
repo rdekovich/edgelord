@@ -1,16 +1,15 @@
 #!/bin/sh
 set -eu
 
-REPO="usealtoal/edgelord"
+REPO="rdekovich/edgelord"
 INSTALL_DIR="${EDGELORD_INSTALL_DIR:-$HOME/.edgelord/bin}"
-NO_MODIFY_PATH="${EDGELORD_NO_MODIFY_PATH:-}"
 
 main() {
     os=$(uname -s | tr '[:upper:]' '[:lower:]')
     arch=$(uname -m)
 
     case "$os" in
-        linux) os="unknown-linux-musl" ;;
+        linux) os="unknown-linux-gnu" ;;
         darwin) os="apple-darwin" ;;
         *) echo "error: unsupported OS: $os" >&2; exit 1 ;;
     esac
@@ -32,55 +31,32 @@ main() {
 
     url="https://github.com/$REPO/releases/download/v${version}/edgelord-${target}.tar.gz"
 
+    case "$version" in
+        ''|*[!0-9A-Za-z.+-]*) echo "error: invalid release version" >&2; exit 1 ;;
+    esac
     echo "downloading edgelord v${version} for ${target}..."
     tmpdir=$(mktemp -d)
-    curl -fsSL "$url" | tar xz -C "$tmpdir"
-
-    mkdir -p "$INSTALL_DIR"
-    mv "$tmpdir/edgelord" "$INSTALL_DIR/edgelord"
-    chmod +x "$INSTALL_DIR/edgelord"
-    rm -rf "$tmpdir"
-
-    echo "installed edgelord to $INSTALL_DIR/edgelord"
-
-    # Add to PATH if not already present
-    if [ -z "$NO_MODIFY_PATH" ]; then
-        case ":$PATH:" in
-            *":$INSTALL_DIR:"*) ;;
-            *)
-                shell_config=""
-                case "${SHELL:-}" in
-                    */zsh) shell_config="$HOME/.zshrc" ;;
-                    */bash)
-                        if [ -f "$HOME/.bashrc" ]; then
-                            shell_config="$HOME/.bashrc"
-                        else
-                            shell_config="$HOME/.bash_profile"
-                        fi
-                        ;;
-                    */fish) shell_config="$HOME/.config/fish/config.fish" ;;
-                esac
-
-                if [ -n "$shell_config" ]; then
-                    if ! grep -q "/.edgelord/bin" "$shell_config" 2>/dev/null; then
-                        mkdir -p "$(dirname "$shell_config")"
-                        case "${SHELL:-}" in
-                            */fish)
-                                printf '\n# Added by edgelord installer\nfish_add_path "$HOME/.edgelord/bin"\n' >> "$shell_config"
-                                ;;
-                            *)
-                                printf '\n# Added by edgelord installer\nexport PATH="$HOME/.edgelord/bin:$PATH"\n' >> "$shell_config"
-                                ;;
-                        esac
-                        echo "added $INSTALL_DIR to PATH in $shell_config"
-                    fi
-                    export PATH="$INSTALL_DIR:$PATH"
-                else
-                    echo "add $INSTALL_DIR to your PATH"
-                fi
-                ;;
-        esac
+    trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM
+    archive="edgelord-${target}.tar.gz"
+    curl -fsSL "$url" -o "$tmpdir/$archive"
+    curl -fsSL "$url.sha256" -o "$tmpdir/$archive.sha256"
+    expected=$(awk 'NR == 1 {print $1}' "$tmpdir/$archive.sha256")
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual=$(sha256sum "$tmpdir/$archive" | awk '{print $1}')
+    else
+        actual=$(shasum -a 256 "$tmpdir/$archive" | awk '{print $1}')
     fi
+    [ "${#expected}" = 64 ] && [ "$expected" = "$actual" ] || {
+        echo "error: release checksum mismatch" >&2; exit 1;
+    }
+    tar xzf "$tmpdir/$archive" -C "$tmpdir" edgelord
+    mkdir -p "$INSTALL_DIR"
+    install -m 755 "$tmpdir/edgelord" "$INSTALL_DIR/edgelord"
+    echo "installed edgelord to $INSTALL_DIR/edgelord"
+    case ":$PATH:" in
+        *":$INSTALL_DIR:"*) ;;
+        *) echo "add $INSTALL_DIR to your shell's PATH" ;;
+    esac
 
     echo "run 'edgelord init' to get started"
 }

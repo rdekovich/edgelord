@@ -46,6 +46,9 @@ impl TelegramControl {
         }
 
         self.state.reset_circuit_breaker();
+        if self.state.is_circuit_breaker_active() {
+            return "Trading remains halted: execution reconciliation is required".into();
+        }
         "▶️ Trading resumed".to_string()
     }
 }

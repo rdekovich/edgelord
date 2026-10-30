@@ -29,5 +29,5 @@ mod event;
 mod execution;
 pub mod handler;
 mod opportunity;
-mod position;
+pub mod position;
 mod slippage;

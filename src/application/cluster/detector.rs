@@ -1,4 +1,4 @@
-//! Cluster detection logic using Frank-Wolfe projection.
+//! Cluster detection using bounded enumeration of executable YES/NO baskets.
 //!
 //! Encapsulates the arbitrage detection algorithm for a single cluster,
 //! separate from the service lifecycle management.
@@ -6,16 +6,13 @@
 use std::sync::Arc;
 
 use rust_decimal::Decimal;
-use tracing::{info, trace};
 
 use crate::domain::{
-    book::Book, cluster::Cluster, constraint::VariableBounds, id::TokenId, market::MarketRegistry,
+    book::Book, cluster::Cluster, constraint::ConstraintSense, id::TokenId, market::MarketRegistry,
     opportunity::Opportunity, opportunity::OpportunityLeg,
 };
 use crate::error::{Error, Result};
-use crate::port::{
-    outbound::solver::IlpProblem, outbound::solver::LpProblem, outbound::solver::ProjectionSolver,
-};
+use crate::port::outbound::solver::ProjectionSolver;
 
 use super::service::{ClusterDetectionConfig, ClusterOpportunity};
 
@@ -79,7 +76,7 @@ pub struct ClusterDetector {
     /// Detection configuration.
     config: ClusterDetectionConfig,
     /// Projection solver for running Frank-Wolfe.
-    projection_solver: Arc<dyn ProjectionSolver>,
+    _projection_solver: Arc<dyn ProjectionSolver>,
 }
 
 impl ClusterDetector {
@@ -90,7 +87,7 @@ impl ClusterDetector {
     ) -> Self {
         Self {
             config,
-            projection_solver,
+            _projection_solver: projection_solver,
         }
     }
 
@@ -120,150 +117,140 @@ impl ClusterDetector {
         book_lookup: BookLookup<'_>,
         registry: &MarketRegistry,
     ) -> Result<Option<ClusterOpportunity>> {
-        let cluster_id = cluster.id.to_string();
-
-        // Gather prices
-        let (prices, token_ids) = self.gather_prices(cluster, book_lookup, registry)?;
-
-        if prices.len() < 2 {
+        // Enumerate bounded portfolios and prove their minimum payout against every
+        // allowed resolution. Projection distance is not an executable portfolio.
+        let n = cluster.markets.len();
+        if !(2..=8).contains(&n) {
             return Err(Error::Parse(
-                DetectionError::InsufficientMarkets {
-                    cluster_id: cluster_id.clone(),
-                    count: prices.len(),
-                }
-                .to_string(),
+                "Executable clusters require 2..=8 markets".into(),
             ));
         }
-
-        // Build ILP problem
-        let lp = LpProblem {
-            objective: prices.clone(),
-            constraints: cluster.constraints.clone(),
-            bounds: vec![VariableBounds::binary(); prices.len()],
-        };
-        let ilp = IlpProblem::all_binary(lp);
-
-        // Run Frank-Wolfe projection
-        let result = self
-            .projection_solver
-            .project(&prices, &ilp)
-            .map_err(|e| Error::Parse(DetectionError::SolverFailed(e.to_string()).to_string()))?;
-
-        // Check threshold
-        if result.gap < self.config.min_gap {
-            trace!(
-                cluster = %cluster_id,
-                gap = %result.gap,
-                threshold = %self.config.min_gap,
-                "Gap below threshold"
-            );
-            return Ok(None);
+        if cluster.constraints.is_empty()
+            || cluster
+                .constraints
+                .iter()
+                .any(|c| c.coefficients.len() != n)
+        {
+            return Err(Error::Parse(
+                "Missing or malformed cluster constraints".into(),
+            ));
         }
-
-        info!(
-            cluster = %cluster_id,
-            gap = %result.gap,
-            iterations = result.iterations,
-            "Found cluster arbitrage"
-        );
-
-        // Build opportunity
-        let opportunity =
-            self.build_opportunity(cluster, &token_ids, &result.values, result.gap, registry)?;
-
-        Ok(Some(ClusterOpportunity {
-            cluster_id,
+        let scenarios: Vec<usize> = (0..(1usize << n))
+            .filter(|mask| {
+                cluster.constraints.iter().all(|c| {
+                    let lhs: Decimal = c
+                        .coefficients
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| mask & (1 << i) != 0)
+                        .map(|(_, coefficient)| *coefficient)
+                        .sum();
+                    match c.sense {
+                        ConstraintSense::LessEqual => lhs <= c.rhs,
+                        ConstraintSense::GreaterEqual => lhs >= c.rhs,
+                        ConstraintSense::Equal => lhs == c.rhs,
+                    }
+                })
+            })
+            .collect();
+        if scenarios.is_empty() {
+            return Err(Error::Parse("Contradictory market constraints".into()));
+        }
+        let mut quotes = Vec::new();
+        for id in &cluster.markets {
+            let market = registry
+                .get_by_market_id(id)
+                .ok_or_else(|| Error::Parse(format!("Missing market {id}")))?;
+            if !market.is_binary() || market.payout() != Decimal::ONE {
+                return Err(Error::Parse(
+                    "Combinatorial execution requires binary $1 markets".into(),
+                ));
+            }
+            let mut sides = Vec::new();
+            for outcome in market.outcomes() {
+                sides.push(book_lookup(outcome.token_id()).and_then(|book| {
+                    book.best_ask()
+                        .filter(|l| {
+                            l.price() > Decimal::ZERO
+                                && l.price() < Decimal::ONE
+                                && l.size() > Decimal::ZERO
+                        })
+                        .map(|l| (outcome.token_id().clone(), l.price(), l.size()))
+                }));
+            }
+            if sides.iter().all(Option::is_none) {
+                return Err(Error::Parse(format!("Missing quotes for {id}")));
+            }
+            quotes.push(sides);
+        }
+        let mut best: Option<Opportunity> = None;
+        // Each market contributes no token, YES, or NO. Uniform quantities are
+        // intentional; unsupported weighted portfolios are never approximated.
+        for mut code in 1..3usize.pow(n as u32) {
+            let (mut yes, mut no) = (0usize, 0usize);
+            let mut legs = Vec::new();
+            let mut volume = Decimal::MAX;
+            let mut available = true;
+            for (i, sides) in quotes.iter().enumerate() {
+                let choice = code % 3;
+                code /= 3;
+                if choice == 0 {
+                    continue;
+                }
+                let Some((token, price, size)) = &sides[choice - 1] else {
+                    available = false;
+                    break;
+                };
+                if choice == 1 {
+                    yes |= 1 << i;
+                } else {
+                    no |= 1 << i;
+                }
+                legs.push(OpportunityLeg::new(token.clone(), *price));
+                volume = volume.min(*size);
+            }
+            if !available || legs.len() < 2 {
+                continue;
+            }
+            let payout = scenarios
+                .iter()
+                .map(|mask| (mask & yes).count_ones() + ((!mask & no).count_ones()))
+                .min()
+                .unwrap_or(0);
+            if payout == 0 {
+                continue;
+            }
+            let opportunity = Opportunity::with_strategy(
+                cluster.markets[0].clone(),
+                format!("Conditional portfolio for cluster {}", cluster.id),
+                legs,
+                volume,
+                Decimal::from(payout),
+                "combinatorial",
+            );
+            if opportunity.edge() < self.config.min_gap || opportunity.edge() <= Decimal::ZERO {
+                continue;
+            }
+            if best
+                .as_ref()
+                .is_none_or(|old| opportunity.expected_profit() > old.expected_profit())
+            {
+                best = Some(opportunity);
+            }
+        }
+        Ok(best.map(|opportunity| ClusterOpportunity {
+            cluster_id: cluster.id.to_string(),
             markets: cluster.markets.clone(),
-            gap: result.gap,
+            gap: opportunity.edge(),
             opportunity,
         }))
-    }
-
-    /// Gather current ask prices for all markets in a cluster.
-    fn gather_prices(
-        &self,
-        cluster: &Cluster,
-        book_lookup: BookLookup<'_>,
-        registry: &MarketRegistry,
-    ) -> Result<(Vec<Decimal>, Vec<TokenId>)> {
-        let mut prices = Vec::with_capacity(cluster.markets.len());
-        let mut token_ids = Vec::with_capacity(cluster.markets.len());
-
-        for market_id in &cluster.markets {
-            let market = registry.get_by_market_id(market_id).ok_or_else(|| {
-                Error::Parse(
-                    DetectionError::MissingPriceData {
-                        market_id: market_id.to_string(),
-                    }
-                    .to_string(),
-                )
-            })?;
-
-            let yes_token = market.outcomes().first().ok_or_else(|| {
-                Error::Parse(
-                    DetectionError::MissingPriceData {
-                        market_id: market_id.to_string(),
-                    }
-                    .to_string(),
-                )
-            })?;
-
-            let book = book_lookup(yes_token.token_id()).ok_or_else(|| {
-                Error::Parse(
-                    DetectionError::MissingPriceData {
-                        market_id: market_id.to_string(),
-                    }
-                    .to_string(),
-                )
-            })?;
-
-            let price = book.best_ask().map(|l| l.price()).unwrap_or(Decimal::ONE);
-            prices.push(price);
-            token_ids.push(yes_token.token_id().clone());
-        }
-
-        Ok((prices, token_ids))
-    }
-
-    /// Build an opportunity from Frank-Wolfe projection results.
-    fn build_opportunity(
-        &self,
-        cluster: &Cluster,
-        token_ids: &[TokenId],
-        projected_prices: &[Decimal],
-        gap: Decimal,
-        registry: &MarketRegistry,
-    ) -> Result<Opportunity> {
-        let legs: Vec<OpportunityLeg> = token_ids
-            .iter()
-            .zip(projected_prices.iter())
-            .map(|(token_id, &price)| OpportunityLeg::new(token_id.clone(), price))
-            .collect();
-
-        let market_id = cluster
-            .markets
-            .first()
-            .ok_or_else(|| Error::Parse("Cluster has no markets".to_string()))?
-            .clone();
-
-        let question = registry
-            .get_by_market_id(&market_id)
-            .map(|m| m.question().to_string())
-            .unwrap_or_else(|| format!("Cluster {}", cluster.id));
-
-        Ok(Opportunity::new(
-            market_id,
-            question,
-            legs,
-            gap,
-            Decimal::ONE,
-        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::port::outbound::solver::IlpProblem;
     use crate::port::{outbound::solver::ProjectionResult, outbound::solver::ProjectionSolver};
 
     struct MockProjectionSolver;

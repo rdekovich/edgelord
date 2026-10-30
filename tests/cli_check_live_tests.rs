@@ -22,7 +22,10 @@ fn check_live_warns_on_missing_wallet_or_mainnet() {
     let _guard = ENV_LOCK.lock().expect("env lock poisoned");
 
     let template = include_str!("../config.toml.example");
-    let path = write_temp_config(template);
+    let testnet = template
+        .replace("chain_id = 137", "chain_id = 80002")
+        .replace("environment = \"mainnet\"", "environment = \"testnet\"");
+    let path = write_temp_config(&testnet);
 
     std::env::remove_var("WALLET_PRIVATE_KEY");
     std::env::remove_var("EDGELORD_KEYSTORE_PASSWORD");
@@ -57,7 +60,9 @@ fn check_live_fails_when_environment_is_testnet_even_with_mainnet_chain_id() {
     let _guard = ENV_LOCK.lock().expect("env lock poisoned");
 
     let template = include_str!("../config.toml.example");
-    let testnet_chain137 = template.replace("chain_id = 80002", "chain_id = 137");
+    let testnet_chain137 = template
+        .replace("environment = \"mainnet\"", "environment = \"testnet\"")
+        .replace("dry_run = true", "dry_run = false");
     let path = write_temp_config(&testnet_chain137);
 
     std::env::set_var(
@@ -78,7 +83,7 @@ fn check_live_fails_when_environment_is_testnet_even_with_mainnet_chain_id() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Environment"),
+        stdout.contains("Environment is not mainnet"),
         "expected environment warning in stdout: {stdout}"
     );
     assert!(

@@ -18,6 +18,7 @@ pub struct PolymarketSubscribeMessage {
     pub assets_ids: Vec<String>,
     #[serde(rename = "type")]
     pub msg_type: String,
+    pub custom_feature_enabled: bool,
 }
 
 impl PolymarketSubscribeMessage {
@@ -25,6 +26,7 @@ impl PolymarketSubscribeMessage {
         Self {
             assets_ids: asset_ids,
             msg_type: "market".into(),
+            custom_feature_enabled: true,
         }
     }
 }
@@ -39,8 +41,41 @@ pub enum PolymarketWsMessage {
     /// Array of book snapshots (primary message format).
     Books(Vec<PolymarketBookMessage>),
 
+    /// Single book snapshot.
+    Book(PolymarketBookMessage),
+
+    /// Absolute size changes at individual price levels.
+    PriceChanges(PolymarketPriceChanges),
+
+    /// Lifecycle updates requested with custom_feature_enabled.
+    Lifecycle(PolymarketLifecycle),
+
     /// Unknown or unparseable message.
     Unknown(serde_json::Value),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "event_type")]
+pub enum PolymarketLifecycle {
+    #[serde(rename = "market_resolved")]
+    Resolved {
+        market: String,
+        winning_asset_id: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PolymarketPriceChanges {
+    pub price_changes: Vec<PolymarketPriceChange>,
+    pub timestamp: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PolymarketPriceChange {
+    pub asset_id: String,
+    pub price: rust_decimal::Decimal,
+    pub size: rust_decimal::Decimal,
+    pub side: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +96,7 @@ impl PolymarketBookMessage {
         let bids = Self::parse_levels(&self.bids);
         let asks = Self::parse_levels(&self.asks);
         Book::with_levels(token_id, bids, asks)
+            .with_source_timestamp(self.timestamp.as_deref().and_then(|v| v.parse().ok()))
     }
 
     fn parse_levels(levels: &[PolymarketWsPriceLevel]) -> Vec<PriceLevel> {
@@ -145,7 +181,7 @@ mod tests {
                 assert_eq!(books[0].asset_id, "token-yes");
                 assert_eq!(books[0].market, Some("0xmarket".into()));
             }
-            PolymarketWsMessage::Unknown(_) => panic!("Expected Books variant"),
+            _ => panic!("Expected Books variant"),
         }
     }
 
@@ -163,7 +199,7 @@ mod tests {
                 assert_eq!(books[0].asset_id, "token-1");
                 assert_eq!(books[1].asset_id, "token-2");
             }
-            PolymarketWsMessage::Unknown(_) => panic!("Expected Books variant"),
+            _ => panic!("Expected Books variant"),
         }
     }
 
@@ -175,7 +211,7 @@ mod tests {
             PolymarketWsMessage::Books(books) => {
                 assert!(books.is_empty());
             }
-            PolymarketWsMessage::Unknown(_) => panic!("Expected Books variant"),
+            _ => panic!("Expected Books variant"),
         }
     }
 
@@ -188,7 +224,7 @@ mod tests {
             PolymarketWsMessage::Unknown(value) => {
                 assert!(value.get("type").is_some());
             }
-            PolymarketWsMessage::Books(_) => panic!("Expected Unknown variant"),
+            _ => panic!("Expected Unknown variant"),
         }
     }
 
@@ -389,7 +425,7 @@ mod tests {
                 assert_eq!(orderbook.best_bid().unwrap().price(), dec!(0.451));
                 assert_eq!(orderbook.best_ask().unwrap().price(), dec!(0.461));
             }
-            PolymarketWsMessage::Unknown(_) => panic!("Expected Books variant"),
+            _ => panic!("Expected Books variant"),
         }
     }
 
@@ -407,7 +443,7 @@ mod tests {
             PolymarketWsMessage::Books(books) => {
                 assert_eq!(books[0].asset_id, "token_with-special.chars123");
             }
-            PolymarketWsMessage::Unknown(_) => panic!("Expected Books variant"),
+            _ => panic!("Expected Books variant"),
         }
     }
 }

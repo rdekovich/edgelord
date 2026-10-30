@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 use super::context::MarketDetectionContext;
 use super::handler::handle_opportunity;
 use super::handler::MarketEventHandlingContext;
-use crate::application::position::manager::{CloseReason, PositionManager};
+
 use crate::port::outbound::exchange::MarketEvent;
 
 /// Process an incoming market event from the data stream.
@@ -27,7 +27,7 @@ pub(crate) fn handle_market_event(event: MarketEvent, context: MarketEventHandli
         MarketEvent::BookSnapshot { token_id, book } => {
             context.cache.update(book);
 
-            if let Some(market) = context.registry.get_by_token(&token_id) {
+            for market in context.registry.get_all_by_token(&token_id) {
                 let ctx = MarketDetectionContext::new(market, context.cache);
                 let opportunities = context.strategies.detect_opportunities(&ctx);
 
@@ -48,7 +48,7 @@ pub(crate) fn handle_market_event(event: MarketEvent, context: MarketEventHandli
         MarketEvent::BookDelta { token_id, book } => {
             context.cache.update(book);
 
-            if let Some(market) = context.registry.get_by_token(&token_id) {
+            for market in context.registry.get_all_by_token(&token_id) {
                 let ctx = MarketDetectionContext::new(market, context.cache);
                 let opportunities = context.strategies.detect_opportunities(&ctx);
 
@@ -78,28 +78,61 @@ pub(crate) fn handle_market_event(event: MarketEvent, context: MarketEventHandli
                 "Market settled"
             );
 
-            let mut tracker = context.state.positions_mut();
-            let total_pnl = context.position_manager.close_all_for_market(
-                &mut tracker,
-                &market_id,
-                |pos| PositionManager::calculate_arbitrage_pnl(pos, payout_per_share),
-                CloseReason::Settlement {
-                    winning_outcome: winning_outcome.clone(),
-                },
-            );
-
-            if total_pnl != Decimal::ZERO {
-                info!(
-                    market_id = %market_id,
-                    total_pnl = %total_pnl,
-                    "Positions settled"
-                );
+            let Some(market) = context.registry.get_by_market_id(&market_id) else {
+                context
+                    .state
+                    .require_reconciliation("Settlement for unknown market");
+                return;
+            };
+            let winner = market.outcomes().iter().find(|o| {
+                o.token_id().as_str() == winning_outcome
+                    || o.name().eq_ignore_ascii_case(&winning_outcome)
+            });
+            let Some(winner) = winner else {
+                context
+                    .state
+                    .require_reconciliation("Unknown winning token in settlement");
+                return;
+            };
+            let payouts: Vec<_> = market
+                .outcomes()
+                .iter()
+                .map(|outcome| {
+                    (
+                        outcome.token_id().clone(),
+                        if outcome.token_id() == winner.token_id() {
+                            payout_per_share
+                        } else {
+                            Decimal::ZERO
+                        },
+                    )
+                })
+                .collect();
+            match context.state.settle_tokens(&payouts) {
+                Ok(closes) => {
+                    for (trade_id, pnl) in closes {
+                        if let Some(trade_id) = trade_id {
+                            context.stats.record_trade_close(
+                                &crate::domain::stats::TradeCloseEvent {
+                                    trade_id,
+                                    realized_profit: pnl,
+                                    reason: "resolution (redemption may remain pending)".into(),
+                                },
+                            );
+                        }
+                    }
+                }
+                Err(error) => context
+                    .state
+                    .require_reconciliation(format!("Cannot persist settlement: {error}")),
             }
+            context.cache.clear();
         }
         MarketEvent::Connected => {
             info!("Data stream connected");
         }
         MarketEvent::Disconnected { reason } => {
+            context.cache.clear();
             warn!(reason = %reason, "Data stream disconnected");
         }
     }

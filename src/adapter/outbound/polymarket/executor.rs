@@ -4,6 +4,7 @@
 //! orders on the Polymarket Central Limit Order Book (CLOB). Supports both
 //! individual order execution and parallel multi-leg arbitrage trades.
 
+use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -11,8 +12,13 @@ use alloy_signer_local::PrivateKeySigner;
 use async_trait::async_trait;
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{Normal, Signer};
+use polymarket_client_sdk::clob::types::request::{
+    OrderBookSummaryRequest, OrdersRequest, TradesRequest,
+};
 use polymarket_client_sdk::clob::types::response::PostOrderResponse;
-use polymarket_client_sdk::clob::types::Side;
+use polymarket_client_sdk::clob::types::{
+    OrderStatusType, OrderType, Side, SignedOrder, TradeStatusType,
+};
 use polymarket_client_sdk::clob::{Client, Config as ClobConfig};
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
@@ -42,6 +48,9 @@ pub struct PolymarketExecutor {
     client: Arc<AuthenticatedClient>,
     /// Local signer for order signatures.
     signer: Arc<PrivateKeySigner>,
+    _account_lock: std::fs::File,
+    chain_id: u64,
+    token_markets: parking_lot::Mutex<std::collections::HashMap<String, String>>,
 }
 
 impl PolymarketExecutor {
@@ -69,6 +78,31 @@ impl PolymarketExecutor {
             })?
             .with_chain_id(Some(chain_id));
 
+        if chain_id != 137 {
+            return Err(ConfigError::Other(
+                "Live CLOB execution supports Polygon mainnet only; use dry-run otherwise".into(),
+            )
+            .into());
+        }
+        let lock_path = std::env::temp_dir().join(format!(
+            "edgelord-account-{chain_id}-{}.lock",
+            signer.address()
+        ));
+        let account_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(lock_path)?;
+        if unsafe { libc::flock(account_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(ExecutionError::AuthFailed(
+                "Another edgelord process owns this trading account".into(),
+            )
+            .into());
+        }
+
         info!(
             chain_id = chain_id,
             address = %signer.address(),
@@ -88,6 +122,9 @@ impl PolymarketExecutor {
         Ok(Self {
             client: Arc::new(client),
             signer: Arc::new(signer),
+            _account_lock: account_lock,
+            chain_id,
+            token_markets: parking_lot::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -112,23 +149,27 @@ impl PolymarketExecutor {
         }
 
         let volume = opportunity.volume();
+        self.client.invalidate_internal_caches();
 
-        // Execute all legs in parallel
-        let futures: Vec<_> = legs
-            .iter()
-            .map(|leg| {
-                let token_id = leg.token_id().clone();
-                let token_str = token_id.to_string();
-                let price = leg.ask_price();
-                async move {
-                    let result = self
-                        .submit_order(&token_str, Side::Buy, volume, price)
-                        .await;
-                    (token_id, result)
+        // Build and validate the entire basket before submitting any leg.
+        let mut prepared = Vec::new();
+        for leg in legs {
+            match self
+                .prepare_order(leg.token_id().as_str(), Side::Buy, volume, leg.ask_price())
+                .await
+            {
+                Ok(order) => prepared.push((leg.token_id().clone(), order)),
+                Err(error) => {
+                    return Ok(TradeResult::Failed {
+                        reason: format!("Preflight rejected basket: {error}"),
+                    })
                 }
-            })
-            .collect();
-
+            }
+        }
+        let futures = prepared.into_iter().map(|(token_id, order)| async move {
+            let result = self.post_confirmed(order).await;
+            (token_id, result)
+        });
         let results = futures_util::future::join_all(futures).await;
 
         // Separate successful and failed legs
@@ -136,19 +177,36 @@ impl PolymarketExecutor {
         let mut failures = Vec::new();
 
         for (token_id, result) in results {
-            match result {
-                Ok(resp) => {
-                    fills.push(Fill {
+            // Transport errors and nonterminal responses are ambiguous. The caller
+            // retains the entire durable reservation rather than guessing no fill.
+            let response = result?;
+            match classify_response(&response, Side::Buy, volume)? {
+                ExecutionResult::Success {
+                    filled_amount,
+                    average_price,
+                    ..
+                } => {
+                    fills.push(Fill::new(
                         token_id,
-                        order_id: resp.order_id,
-                    });
+                        response.order_id,
+                        filled_amount,
+                        average_price,
+                    ));
                 }
-                Err(err) => {
-                    failures.push(Failure {
-                        token_id,
-                        error: err.to_string(),
-                    });
+                ExecutionResult::PartialFill {
+                    filled_amount,
+                    average_price,
+                    ..
+                } => {
+                    fills.push(Fill::new(
+                        token_id.clone(),
+                        response.order_id,
+                        filled_amount,
+                        average_price,
+                    ));
+                    failures.push(Failure::new(token_id, "Incomplete confirmed quantity"));
                 }
+                ExecutionResult::Failed { reason } => failures.push(Failure::new(token_id, reason)),
             }
         }
 
@@ -184,12 +242,81 @@ impl PolymarketExecutor {
         size: Decimal,
         price: Decimal,
     ) -> Result<PostOrderResponse> {
+        let order = self.prepare_order(token_id, side, size, price).await?;
+        self.post_confirmed(order).await
+    }
+
+    async fn prepare_order(
+        &self,
+        token_id: &str,
+        side: Side,
+        size: Decimal,
+        price: Decimal,
+    ) -> Result<SignedOrder> {
         // Parse token ID to U256
         let token_id_u256 =
             U256::from_str(token_id).map_err(|e| ExecutionError::InvalidTokenId {
                 token_id: token_id.to_string(),
                 reason: e.to_string(),
             })?;
+
+        if size <= Decimal::ZERO || price <= Decimal::ZERO || price >= Decimal::ONE {
+            return Err(ExecutionError::OrderBuildFailed("Invalid size or price".into()).into());
+        }
+        let fee =
+            self.client.fee_rate_bps(token_id_u256).await.map_err(|e| {
+                ExecutionError::OrderBuildFailed(format!("Cannot verify fees: {e}"))
+            })?;
+        if fee.base_fee != 0 {
+            return Err(ExecutionError::OrderBuildFailed(
+                "Fee-bearing markets require an implemented net-share fee model".into(),
+            )
+            .into());
+        }
+
+        let book = self
+            .client
+            .order_book(
+                &OrderBookSummaryRequest::builder()
+                    .token_id(token_id_u256)
+                    .build(),
+            )
+            .await?;
+        self.token_markets
+            .lock()
+            .insert(token_id.to_string(), book.market.to_string());
+        let market = self.client.market(&book.market.to_string()).await?;
+        if !market.active
+            || market.closed
+            || !market.accepting_orders
+            || market.seconds_delay != 0
+            || market.taker_base_fee != Decimal::ZERO
+            || size < book.min_order_size
+        {
+            return Err(ExecutionError::OrderBuildFailed(
+                "Market not eligible: closed, delayed, fee-bearing, or below minimum size".into(),
+            )
+            .into());
+        }
+        let available: Decimal = if side == Side::Buy {
+            book.asks
+                .iter()
+                .filter(|level| level.price <= price)
+                .map(|level| level.size)
+                .sum()
+        } else {
+            book.bids
+                .iter()
+                .filter(|level| level.price >= price)
+                .map(|level| level.size)
+                .sum()
+        };
+        if available < size {
+            return Err(ExecutionError::OrderBuildFailed(
+                "Insufficient fresh executable depth".into(),
+            )
+            .into());
+        }
 
         // Build limit order
         let order = self
@@ -199,6 +326,7 @@ impl PolymarketExecutor {
             .side(side)
             .price(price)
             .size(size)
+            .order_type(OrderType::FOK)
             .build()
             .await
             .map_err(|e| ExecutionError::OrderBuildFailed(e.to_string()))?;
@@ -210,22 +338,52 @@ impl PolymarketExecutor {
             .await
             .map_err(|e| ExecutionError::SigningFailed(e.to_string()))?;
 
-        // Submit order
-        let response = self
+        Ok(signed_order)
+    }
+
+    async fn post_confirmed(&self, order: SignedOrder) -> Result<PostOrderResponse> {
+        let mut response = self
             .client
-            .post_order(signed_order)
+            .post_order(order)
             .await
-            .map_err(|e| ExecutionError::SubmissionFailed(e.to_string()))?;
-
-        info!(
-            order_id = %response.order_id,
-            token_id = token_id,
-            side = ?side,
-            size = %size,
-            price = %price,
-            "Order submitted"
-        );
-
+            .map_err(|error| ExecutionError::SubmissionFailed(error.to_string()))?;
+        if response.success && response.status == OrderStatusType::Matched {
+            if response.trade_ids.is_empty() {
+                response.trade_ids = self
+                    .client
+                    .order(&response.order_id)
+                    .await?
+                    .associate_trades;
+            }
+            if response.trade_ids.is_empty() {
+                return Err(ExecutionError::SubmissionFailed(
+                    "Matched order has no trade IDs; reconcile settlement".into(),
+                )
+                .into());
+            }
+            for id in &response.trade_ids {
+                loop {
+                    let page = self
+                        .client
+                        .trades(&TradesRequest::builder().id(id).build(), None)
+                        .await?;
+                    let trade = page
+                        .data
+                        .iter()
+                        .find(|trade| &trade.id == id && trade.taker_order_id == response.order_id);
+                    match trade.map(|trade| &trade.status) {
+                        Some(TradeStatusType::Confirmed) => break,
+                        Some(TradeStatusType::Failed) => {
+                            return Err(ExecutionError::SubmissionFailed(
+                                "Matched trade failed settlement; reconciliation required".into(),
+                            )
+                            .into())
+                        }
+                        _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+                    }
+                }
+            }
+        }
         Ok(response)
     }
 
@@ -256,6 +414,62 @@ impl PolymarketExecutor {
     }
 }
 
+/// Only terminal, quantified fills may change inventory. A successful HTTP
+/// response is not evidence that an order filled.
+fn classify_response(
+    response: &PostOrderResponse,
+    side: Side,
+    requested: Decimal,
+) -> Result<ExecutionResult> {
+    if !response.success {
+        if response.making_amount != Decimal::ZERO || response.taking_amount != Decimal::ZERO {
+            return Err(ExecutionError::SubmissionFailed(
+                "Rejected response has nonzero amounts; reconciliation required".into(),
+            )
+            .into());
+        }
+        return Ok(ExecutionResult::Failed {
+            reason: response
+                .error_msg
+                .clone()
+                .unwrap_or_else(|| "Exchange rejected order".into()),
+        });
+    }
+    if response.status != OrderStatusType::Matched || response.order_id.is_empty() {
+        return Err(ExecutionError::SubmissionFailed(format!(
+            "Order {} is {:?}; reconciliation required",
+            response.order_id, response.status
+        ))
+        .into());
+    }
+    let (amount, cost) = match side {
+        Side::Buy => (response.taking_amount, response.making_amount),
+        Side::Sell => (response.making_amount, response.taking_amount),
+        _ => return Err(ExecutionError::SubmissionFailed("Unknown side".into()).into()),
+    };
+    if amount <= Decimal::ZERO || amount > requested || cost <= Decimal::ZERO {
+        return Err(ExecutionError::SubmissionFailed(
+            "Invalid matched quantities; reconciliation required".into(),
+        )
+        .into());
+    }
+    let order_id = OrderId::new(response.order_id.clone());
+    if amount < requested {
+        Ok(ExecutionResult::PartialFill {
+            order_id,
+            filled_amount: amount,
+            remaining_amount: requested - amount,
+            average_price: cost / amount,
+        })
+    } else {
+        Ok(ExecutionResult::Success {
+            order_id,
+            filled_amount: amount,
+            average_price: cost / amount,
+        })
+    }
+}
+
 #[async_trait]
 impl OrderExecutor for PolymarketExecutor {
     async fn execute(&self, order: &OrderRequest) -> Result<ExecutionResult> {
@@ -264,19 +478,10 @@ impl OrderExecutor for PolymarketExecutor {
             OrderSide::Sell => Side::Sell,
         };
 
-        match self
+        let response = self
             .submit_order(&order.token_id, side, order.size, order.price)
-            .await
-        {
-            Ok(response) => Ok(ExecutionResult::Success {
-                order_id: OrderId::new(response.order_id),
-                filled_amount: order.size,
-                average_price: order.price,
-            }),
-            Err(e) => Ok(ExecutionResult::Failed {
-                reason: e.to_string(),
-            }),
-        }
+            .await?;
+        classify_response(&response, side, order.size)
     }
 
     async fn cancel(&self, order_id: &OrderId) -> Result<()> {
@@ -290,6 +495,112 @@ impl OrderExecutor for PolymarketExecutor {
 
 #[async_trait]
 impl ArbitrageExecutor for PolymarketExecutor {
+    fn account_identity(&self) -> Option<String> {
+        Some(format!("{}:{}", self.chain_id, self.signer.address()))
+    }
+
+    async fn verify_inventory(
+        &self,
+        positions: &[crate::domain::position::Position],
+    ) -> Result<()> {
+        let orders = self.client.orders(&OrdersRequest::default(), None).await?;
+        if !orders.data.is_empty()
+            || (!orders.next_cursor.is_empty() && orders.next_cursor != "LTE=")
+        {
+            return Err(ExecutionError::AuthFailed(
+                "Existing open orders require reconciliation before trading".into(),
+            )
+            .into());
+        }
+        #[derive(serde::Deserialize)]
+        struct Holding {
+            asset: String,
+            size: Decimal,
+            #[serde(rename = "conditionId")]
+            condition_id: String,
+        }
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()?;
+        let mut actual = std::collections::HashMap::<String, Decimal>::new();
+        let user = self.signer.address().to_string();
+        for page in 0..100 {
+            let holdings: Vec<Holding> = http
+                .get("https://data-api.polymarket.com/positions")
+                .query(&[
+                    ("user", user.clone()),
+                    ("sizeThreshold", "0".into()),
+                    ("limit", "100".into()),
+                    ("offset", (page * 100).to_string()),
+                ])
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            let count = holdings.len();
+            for holding in holdings {
+                self.token_markets
+                    .lock()
+                    .insert(holding.asset.clone(), holding.condition_id);
+                if holding.size > Decimal::ZERO {
+                    *actual.entry(holding.asset).or_default() += holding.size;
+                }
+            }
+            if count < 100 {
+                break;
+            }
+            if page == 99 {
+                return Err(ExecutionError::AuthFailed(
+                    "Inventory pagination exceeded safety bound".into(),
+                )
+                .into());
+            }
+        }
+        let mut expected = std::collections::HashMap::<String, Decimal>::new();
+        for position in positions.iter().filter(|p| !p.status().is_closed()) {
+            for leg in position.legs() {
+                *expected.entry(leg.token_id().to_string()).or_default() += leg.size();
+            }
+        }
+        if actual != expected {
+            return Err(ExecutionError::AuthFailed("Exchange holdings differ from durable ledger; reconcile holdings and redemptions before trading".into()).into());
+        }
+        Ok(())
+    }
+
+    async fn settlement_payouts(
+        &self,
+        positions: &[crate::domain::position::Position],
+    ) -> Result<Vec<(crate::domain::id::TokenId, Decimal)>> {
+        let markets: std::collections::HashSet<String> = {
+            let mapping = self.token_markets.lock();
+            positions
+                .iter()
+                .filter(|p| !p.status().is_closed())
+                .flat_map(|p| p.legs())
+                .filter_map(|leg| mapping.get(leg.token_id().as_str()).cloned())
+                .collect()
+        };
+        let mut payouts = Vec::new();
+        for condition in markets {
+            let market = self.client.market(&condition).await?;
+            if market.closed && market.tokens.iter().filter(|token| token.winner).count() == 1 {
+                payouts.extend(market.tokens.into_iter().map(|token| {
+                    (
+                        crate::domain::id::TokenId::new(token.token_id.to_string()),
+                        if token.winner {
+                            Decimal::ONE
+                        } else {
+                            Decimal::ZERO
+                        },
+                    )
+                }));
+            }
+        }
+        Ok(payouts)
+    }
+
     async fn execute_arbitrage(&self, opportunity: &Opportunity) -> Result<TradeResult> {
         self.execute_arbitrage_impl(opportunity).await
     }
@@ -395,10 +706,14 @@ mod tests {
             Fill {
                 token_id: TokenId::new("yes"),
                 order_id: "order-1".into(),
+                amount: dec!(100),
+                price: dec!(0.45),
             },
             Fill {
                 token_id: TokenId::new("no"),
                 order_id: "order-2".into(),
+                amount: dec!(100),
+                price: dec!(0.45),
             },
         ];
 
@@ -416,6 +731,8 @@ mod tests {
         let fills = vec![Fill {
             token_id: TokenId::new("yes"),
             order_id: "order-1".into(),
+            amount: dec!(100),
+            price: dec!(0.45),
         }];
         let failures = vec![Failure {
             token_id: TokenId::new("no"),
@@ -518,6 +835,8 @@ mod tests {
         let fill = Fill {
             token_id: TokenId::new("token-abc"),
             order_id: "order-xyz".into(),
+            amount: dec!(100),
+            price: dec!(0.45),
         };
 
         assert_eq!(fill.token_id.as_str(), "token-abc");
@@ -730,5 +1049,55 @@ mod integration_tests {
             assert_eq!(OrderExecutor::exchange_name(&executor), "Polymarket");
             assert_eq!(ArbitrageExecutor::exchange_name(&executor), "Polymarket");
         }
+    }
+}
+
+#[cfg(test)]
+mod response_contract_tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+    fn response(status: &str, success: bool, making: &str, taking: &str) -> PostOrderResponse {
+        serde_json::from_value(serde_json::json!({"orderID":"order","status":status,"success":success,"errorMsg":"rejection","makingAmount":making,"takingAmount":taking})).unwrap()
+    }
+    #[test]
+    fn resting_and_delayed_orders_are_never_fills() {
+        for status in ["live", "delayed", "unmatched"] {
+            assert!(
+                classify_response(&response(status, true, "0", "0"), Side::Buy, dec!(100)).is_err()
+            );
+        }
+    }
+    #[test]
+    fn rejects_success_false_even_when_http_succeeded() {
+        assert!(matches!(
+            classify_response(&response("", false, "0", "0"), Side::Buy, dec!(100)).unwrap(),
+            ExecutionResult::Failed { .. }
+        ));
+    }
+    #[test]
+    fn uses_actual_price_and_quantity() {
+        match classify_response(
+            &response("matched", true, "39", "100"),
+            Side::Buy,
+            dec!(100),
+        )
+        .unwrap()
+        {
+            ExecutionResult::Success {
+                filled_amount,
+                average_price,
+                ..
+            } => {
+                assert_eq!(filled_amount, dec!(100));
+                assert_eq!(average_price, dec!(0.39));
+            }
+            _ => panic!("Expected confirmed quantities"),
+        }
+        assert!(
+            matches!(classify_response(&response("matched",true,"16","40"),Side::Buy,dec!(100)).unwrap(),ExecutionResult::PartialFill {filled_amount,remaining_amount,..} if filled_amount==dec!(40)&&remaining_amount==dec!(60))
+        );
+        assert!(
+            classify_response(&response("matched", true, "0", "0"), Side::Buy, dec!(100)).is_err()
+        );
     }
 }

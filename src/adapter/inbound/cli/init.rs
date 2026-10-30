@@ -133,12 +133,12 @@ pub fn execute(path: PathBuf, force: bool) -> Result<()> {
         .interact()?;
 
     let rebalancing = Confirm::with_theme(&theme)
-        .with_prompt("market_rebalancing: Multi-outcome markets")
-        .default(true)
+        .with_prompt("market_rebalancing: Requires reviewed exhaustive_groups")
+        .default(false)
         .interact()?;
 
     let combinatorial = Confirm::with_theme(&theme)
-        .with_prompt("combinatorial: Cross-market (requires LLM)")
+        .with_prompt("combinatorial: Requires reviewed verified_relations")
         .default(false)
         .interact()?;
 
@@ -251,29 +251,13 @@ pub fn execute(path: PathBuf, force: bool) -> Result<()> {
     println!();
     output::section("Next Steps");
 
-    if is_mainnet {
-        output::note(&format!(
-            "1. Fund your wallet with USDC on {}",
-            output::highlight("Polygon")
-        ));
-        output::note(&format!(
-            "2. Verify: {}",
-            output::highlight("edgelord check health")
-        ));
-        output::note(&format!("3. Start:  {}", output::highlight("edgelord run")));
-    } else {
-        output::note("Testnet mode: Polymarket CLOB only supports mainnet for trading.");
-        output::note("edgelord will detect opportunities but cannot execute trades on testnet.");
-        output::note(&format!(
-            "1. Verify: {}",
-            output::highlight("edgelord check health")
-        ));
-        output::note(&format!("2. Start:  {}", output::highlight("edgelord run")));
-        output::note(&format!(
-            "3. For real trading, re-run {} with mainnet",
-            output::highlight("edgelord init")
-        ));
-    }
+    output::note("Setup always starts in dry-run mode; no orders will be submitted.");
+    output::note(
+        "Review docs/configuration.md and docs/deployment/operations.md before enabling execution.",
+    );
+    output::note("Multi-market strategies require verified groups/relations in the config file.");
+    output::note("Live execution supports only Polygon chain 137; testnet is detection-only.");
+    output::note("Start with: edgelord run --dry-run");
 
     Ok(())
 }
@@ -379,10 +363,7 @@ fn generate_config(
     })?;
 
     // General settings
-    table.insert(
-        "dry_run".to_string(),
-        toml::Value::Boolean(environment == "testnet"),
-    );
+    table.insert("dry_run".to_string(), toml::Value::Boolean(true));
 
     // Exchange config
     if let Some(exchange_config) = table
@@ -462,4 +443,29 @@ fn generate_config(
     }
 
     toml::to_string_pretty(&config).map_err(|error| ConfigError::Other(error.to_string()).into())
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+
+    #[test]
+    fn mainnet_wizard_does_not_enable_order_submission() {
+        let text = generate_config(
+            "mainnet",
+            &["single_condition"],
+            100.0,
+            10.0,
+            false,
+            false,
+            Path::new("wallet.json"),
+        )
+        .unwrap();
+        let config: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(config["dry_run"].as_bool(), Some(true));
+        assert_eq!(
+            config["exchange_config"]["chain_id"].as_integer(),
+            Some(137)
+        );
+    }
 }

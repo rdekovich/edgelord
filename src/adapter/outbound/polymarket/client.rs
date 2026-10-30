@@ -155,16 +155,23 @@ impl PolymarketClient {
     /// Returns market data with volume, liquidity, and outcome metadata.
     /// Used for market discovery and filtering.
     pub async fn get_gamma_markets(&self, limit: usize) -> Result<Vec<GammaMarket>> {
-        let url = format!(
-            "{}/markets?active=true&closed=false&limit={}",
-            self.gamma_url, limit
-        );
-
-        info!(url = %url, "Fetching active markets (Gamma)");
-
-        let markets: Vec<GammaMarket> = self.get_with_retry(&url).await?;
-        debug!(count = markets.len(), "Fetched markets from Gamma");
-
+        let mut markets = Vec::new();
+        while markets.len() < limit {
+            let page_size = (limit - markets.len()).min(100);
+            let url = format!(
+                "{}/markets?active=true&closed=false&limit={}&offset={}",
+                self.gamma_url,
+                page_size,
+                markets.len()
+            );
+            let page: Vec<GammaMarket> = self.get_with_retry(&url).await?;
+            let count = page.len();
+            markets.extend(page);
+            if count < page_size {
+                break;
+            }
+        }
+        markets.truncate(limit);
         Ok(markets)
     }
 }

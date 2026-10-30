@@ -46,7 +46,7 @@ impl PositionTracker {
 
     /// Return an iterator over all open positions.
     pub fn open_positions(&self) -> impl Iterator<Item = &Position> {
-        self.positions.iter().filter(|p| p.is_open())
+        self.positions.iter().filter(|p| !p.status().is_closed())
     }
 
     /// Calculate total exposure as the sum of entry costs for open positions.
