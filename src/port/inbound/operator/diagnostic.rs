@@ -45,6 +45,9 @@ pub struct ConfigCheckReport {
 /// Contains checks that must pass before enabling real trading.
 #[derive(Debug, Clone)]
 pub struct LiveReadinessReport {
+    /// Known protocol incompatibility preventing live execution.
+    pub protocol_blocker: Option<String>,
+
     /// Exchange name.
     pub exchange: String,
 
@@ -71,7 +74,8 @@ impl LiveReadinessReport {
     /// Return `true` when all live-trading requirements are satisfied.
     #[must_use]
     pub const fn is_ready(&self) -> bool {
-        self.environment_is_mainnet
+        self.protocol_blocker.is_none()
+            && self.environment_is_mainnet
             && self.chain_is_polygon_mainnet
             && self.wallet_configured
             && !self.dry_run
