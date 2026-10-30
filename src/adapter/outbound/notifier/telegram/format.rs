@@ -13,14 +13,14 @@ pub fn format_event_message(event: &Event, config: &TelegramConfig) -> Option<St
             Some(format!(
                 "🎯 *Opportunity Detected*\n\
                 \n\
-                📋 {}\n\
-                📈 Edge: `{:.2}%`\n\
-                💵 Volume: `${:.2}`\n\
-                💰 Expected: `\\+${:.2}`",
+                {}\n\
+                Edge: `{:.2}%`\n\
+                Contracts per leg: `{:.2}`\n\
+                Estimated gross profit: `{}`\nBefore fees; execution and settlement not confirmed",
                 escape_markdown(&question),
                 e.edge * rust_decimal::Decimal::from(100),
                 e.volume,
-                e.expected_profit
+                signed_usd(e.expected_profit)
             ))
         }
         Event::ExecutionCompleted(e) if config.notify_executions => {
@@ -35,8 +35,8 @@ pub fn format_event_message(event: &Event, config: &TelegramConfig) -> Option<St
             Some(format!(
                 "{} *{}*\n\
                 \n\
-                📋 Market: `{}`\n\
-                📝 {}",
+                Market: {}\n\
+                {}",
                 emoji,
                 title,
                 escape_markdown(&market_display),
@@ -49,8 +49,8 @@ pub fn format_event_message(event: &Event, config: &TelegramConfig) -> Option<St
             Some(format!(
                 "⚠️ *Risk Check Failed*\n\
                 \n\
-                📋 Market: `{}`\n\
-                🚫 Reason: {}",
+                Market: {}\n\
+                Reason: {}",
                 escape_markdown(&market_display),
                 escape_markdown(&e.reason)
             ))
@@ -58,29 +58,29 @@ pub fn format_event_message(event: &Event, config: &TelegramConfig) -> Option<St
         Event::CircuitBreakerActivated { reason } => Some(format!(
             "🛑 *Circuit Breaker Activated*\n\
             \n\
-            ⚠️ Reason: {}\n\
-            ⏸️ Trading halted",
+            Reason: {}\n\
+            Trading halted",
             escape_markdown(reason)
         )),
         Event::CircuitBreakerReset => Some(
             "✅ *Circuit Breaker Reset*\n\
             \n\
-            ▶️ Trading resumed"
+            Trading resumed"
                 .to_string(),
         ),
         Event::DailySummary(e) => Some(format!(
             "📊 *Daily Summary — {}*\n\
             \n\
-            🎯 Opportunities: `{}`\n\
-            📈 Trades: `{}`\n\
-            ✅ Successful: `{}`\n\
-            💰 Profit: `\\+${:.2}`\n\
-            💼 Exposure: `${:.2}`",
+            Opportunities: `{}`\n\
+            Trades: `{}`\n\
+            Successful: `{}`\n\
+            Profit: `{}`\n\
+            Exposure: `${:.2}`",
             escape_markdown(&e.date.to_string()),
             e.opportunities_detected,
             e.trades_executed,
             e.trades_successful,
-            e.total_profit,
+            signed_usd(e.total_profit),
             e.current_exposure
         )),
         Event::RelationsDiscovered(e) => {
@@ -91,7 +91,7 @@ pub fn format_event_message(event: &Event, config: &TelegramConfig) -> Option<St
             let mut msg = format!(
                 "🔗 *Relations Discovered*\n\
                 \n\
-                Found `{}` relation\\(s\\)\n",
+                Advisory only — requires review before trading\nFound `{}` relation\\(s\\)\n",
                 e.relations_count
             );
 
@@ -114,7 +114,7 @@ pub fn format_event_message(event: &Event, config: &TelegramConfig) -> Option<St
                     "\n{}\\. {} *{}* \\({}%\\)\n",
                     i + 1,
                     type_emoji,
-                    type_display,
+                    escape_markdown(type_display),
                     (rel.confidence * 100.0) as u32
                 ));
 
@@ -139,6 +139,11 @@ pub fn format_event_message(event: &Event, config: &TelegramConfig) -> Option<St
     }
 }
 
+fn signed_usd(value: rust_decimal::Decimal) -> String {
+    let sign = if value.is_sign_negative() { "-" } else { "+" };
+    format!("{sign}${:.2}", value.abs())
+}
+
 /// Truncate a string with ellipsis (Unicode-safe).
 pub fn truncate(s: &str, max_chars: usize) -> String {
     let char_count = s.chars().count();
@@ -153,7 +158,8 @@ pub fn truncate(s: &str, max_chars: usize) -> String {
 /// Escape special characters for Telegram `MarkdownV2`.
 pub fn escape_markdown(text: &str) -> String {
     let special_chars = [
-        '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!',
+        '\\', '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.',
+        '!',
     ];
     let mut result = String::with_capacity(text.len() * 2);
 
@@ -176,6 +182,26 @@ mod tests {
     use crate::port::outbound::notifier::{
         ExecutionEvent, OpportunityEvent, RelationDetail, RelationsEvent, RiskEvent, SummaryEvent,
     };
+
+    #[test]
+    fn negative_profit_and_literal_backslashes_render_correctly() {
+        assert_eq!(signed_usd(dec!(-12.50)), "-$12.50");
+        assert_eq!(escape_markdown(r"a\b"), r"a\\b");
+        let message = format_event_message(
+            &Event::DailySummary(SummaryEvent {
+                date: NaiveDate::from_ymd_opt(2026, 10, 30).unwrap(),
+                opportunities_detected: 0,
+                trades_executed: 1,
+                trades_successful: 0,
+                total_profit: dec!(-12.50),
+                current_exposure: dec!(0),
+            }),
+            &test_config(true, true, true),
+        )
+        .unwrap();
+        assert!(message.contains("`-$12.50`"));
+        assert!(!message.contains("+$-"));
+    }
 
     // -------------------------------------------------------------------------
     // escape_markdown tests
@@ -325,9 +351,10 @@ mod tests {
         assert!(msg.contains("rain tomorrow"));
         assert!(msg.contains("Edge:"));
         assert!(msg.contains("5.00%")); // 0.05 * 100
-        assert!(msg.contains("Volume:"));
-        assert!(msg.contains("$100"));
-        assert!(msg.contains("Expected:"));
+        assert!(msg.contains("Contracts per leg:"));
+        assert!(msg.contains("`100.00`"));
+        assert!(!msg.contains("$100"));
+        assert!(msg.contains("Estimated gross profit:"));
         assert!(msg.contains("+$5.25"));
     }
 
