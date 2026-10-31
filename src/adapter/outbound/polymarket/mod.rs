@@ -25,3 +25,5 @@ pub mod market;
 pub mod scorer;
 pub mod settings;
 pub mod stream;
+
+pub mod protocol;

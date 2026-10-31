@@ -36,6 +36,9 @@ impl DiagnosticOperator for Operator {
         let network = config.network();
 
         Ok(LiveReadinessReport {
+            protocol_blocker: Some(
+                crate::adapter::outbound::polymarket::protocol::LIVE_PROTOCOL_BLOCKER.into(),
+            ),
             exchange: format!("{:?}", config.exchange),
             environment: network.environment.to_string(),
             chain_id: network.chain_id,

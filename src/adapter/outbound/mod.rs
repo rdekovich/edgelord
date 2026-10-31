@@ -9,3 +9,6 @@ pub mod solver;
 pub mod sqlite;
 
 pub mod journal;
+
+#[cfg(feature = "polymarket-us")]
+pub mod polymarket_us;

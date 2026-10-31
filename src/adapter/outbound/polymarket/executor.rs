@@ -61,6 +61,7 @@ impl PolymarketExecutor {
     /// Returns an error if the private key is missing or invalid, or if
     /// CLOB authentication fails.
     pub async fn new(config: &PolymarketRuntimeConfig) -> Result<Self> {
+        super::protocol::ensure_live_supported()?;
         if config.private_key.trim().is_empty() {
             return Err(ConfigError::MissingField {
                 field: "WALLET_PRIVATE_KEY",

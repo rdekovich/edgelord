@@ -56,7 +56,7 @@ Before each deployment:
 
 ## Execution and recovery limits
 
-Live execution currently supports fee-free, immediate-execution contracts, Polygon chain 137, and a dedicated EOA wallet. Fresh REST depth, market status, tick size, minimum order size and zero taker fees are checked before orders are submitted. Each leg is FOK; a basket of orders is not atomic. An accepted HTTP response is not a confirmed fill.
+The International adapter uses the archived V1 SDK; upstream marks it nonfunctional. Do not enable live trading until V2 migration and funded verification are complete. The existing execution model targets fee-free, immediate-execution contracts, Polygon chain 137, and a dedicated EOA wallet. The optional US protocol probe is read-only and is not a trading service. Fresh REST depth, market status, tick size, minimum order size and zero taker fees are checked before orders are submitted. Each leg is FOK; a basket of orders is not atomic. An accepted HTTP response is not a confirmed fill.
 
 Back up `edgelord.db` **and** `edgelord.db.execution.jsonl` together while the process is stopped. The journal durably records intent before submission and confirmed outcomes before releasing reservations. It is bound to the account; process locks prevent concurrent use on the same host. These locks do not coordinate separate hosts: run only one trader for an account.
 

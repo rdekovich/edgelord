@@ -14,6 +14,9 @@ pub fn execute_live<P: AsRef<Path>>(config_path: P) -> Result<()> {
     output::field("Chain ID", report.chain_id);
     output::field("Dry run", report.dry_run);
 
+    if let Some(reason) = &report.protocol_blocker {
+        output::warning(reason);
+    }
     if !report.environment_is_mainnet {
         output::warning("Environment is not mainnet (expected mainnet)");
     }
@@ -40,11 +43,27 @@ pub fn execute_live<P: AsRef<Path>>(config_path: P) -> Result<()> {
 mod tests {
     use crate::port::inbound::operator::diagnostic::LiveReadinessReport;
 
+    #[test]
+    fn retired_protocol_blocks_otherwise_valid_configuration() {
+        let report = LiveReadinessReport {
+            protocol_blocker: Some("Protocol retired".into()),
+            exchange: "polymarket".into(),
+            environment: "mainnet".into(),
+            chain_id: 137,
+            dry_run: false,
+            environment_is_mainnet: true,
+            chain_is_polygon_mainnet: true,
+            wallet_configured: true,
+        };
+        assert!(!report.is_ready());
+    }
+
     // Tests for LiveReadinessReport.is_ready()
 
     #[test]
     fn test_live_readiness_all_conditions_met() {
         let report = LiveReadinessReport {
+            protocol_blocker: None,
             exchange: "polymarket".to_string(),
             environment: "mainnet".to_string(),
             chain_id: 137,
@@ -59,6 +78,7 @@ mod tests {
     #[test]
     fn test_live_readiness_environment_not_mainnet() {
         let report = LiveReadinessReport {
+            protocol_blocker: None,
             exchange: "polymarket".to_string(),
             environment: "testnet".to_string(),
             chain_id: 137,
@@ -73,6 +93,7 @@ mod tests {
     #[test]
     fn test_live_readiness_wrong_chain_id() {
         let report = LiveReadinessReport {
+            protocol_blocker: None,
             exchange: "polymarket".to_string(),
             environment: "mainnet".to_string(),
             chain_id: 80002, // Amoy testnet
@@ -87,6 +108,7 @@ mod tests {
     #[test]
     fn test_live_readiness_wallet_not_configured() {
         let report = LiveReadinessReport {
+            protocol_blocker: None,
             exchange: "polymarket".to_string(),
             environment: "mainnet".to_string(),
             chain_id: 137,
@@ -101,6 +123,7 @@ mod tests {
     #[test]
     fn test_live_readiness_dry_run_enabled() {
         let report = LiveReadinessReport {
+            protocol_blocker: None,
             exchange: "polymarket".to_string(),
             environment: "mainnet".to_string(),
             chain_id: 137,
@@ -115,6 +138,7 @@ mod tests {
     #[test]
     fn test_live_readiness_multiple_failures() {
         let report = LiveReadinessReport {
+            protocol_blocker: None,
             exchange: "polymarket".to_string(),
             environment: "testnet".to_string(),
             chain_id: 80002,
@@ -129,6 +153,7 @@ mod tests {
     #[test]
     fn test_live_readiness_only_dry_run_false_rest_failing() {
         let report = LiveReadinessReport {
+            protocol_blocker: None,
             exchange: "polymarket".to_string(),
             environment: "testnet".to_string(),
             chain_id: 80002,
@@ -145,6 +170,7 @@ mod tests {
     #[test]
     fn test_live_readiness_report_clone() {
         let report = LiveReadinessReport {
+            protocol_blocker: None,
             exchange: "polymarket".to_string(),
             environment: "mainnet".to_string(),
             chain_id: 137,
@@ -169,6 +195,7 @@ mod tests {
     #[test]
     fn test_live_readiness_report_debug() {
         let report = LiveReadinessReport {
+            protocol_blocker: None,
             exchange: "polymarket".to_string(),
             environment: "mainnet".to_string(),
             chain_id: 137,
@@ -190,6 +217,7 @@ mod tests {
     fn test_live_readiness_chain_id_values() {
         // Test with Polygon mainnet
         let mainnet = LiveReadinessReport {
+            protocol_blocker: None,
             exchange: "polymarket".to_string(),
             environment: "mainnet".to_string(),
             chain_id: 137,
@@ -202,6 +230,7 @@ mod tests {
 
         // Test with Amoy testnet
         let testnet = LiveReadinessReport {
+            protocol_blocker: None,
             exchange: "polymarket".to_string(),
             environment: "testnet".to_string(),
             chain_id: 80002,
@@ -216,6 +245,7 @@ mod tests {
     #[test]
     fn test_live_readiness_empty_exchange() {
         let report = LiveReadinessReport {
+            protocol_blocker: None,
             exchange: "".to_string(),
             environment: "mainnet".to_string(),
             chain_id: 137,
@@ -232,6 +262,7 @@ mod tests {
     #[test]
     fn test_live_readiness_empty_environment() {
         let report = LiveReadinessReport {
+            protocol_blocker: None,
             exchange: "polymarket".to_string(),
             environment: "".to_string(),
             chain_id: 137,
@@ -257,6 +288,7 @@ mod tests {
 
         for (env_mainnet, chain_mainnet, wallet, dry_run) in scenarios {
             let report = LiveReadinessReport {
+                protocol_blocker: None,
                 exchange: "test".to_string(),
                 environment: "test".to_string(),
                 chain_id: 137,
