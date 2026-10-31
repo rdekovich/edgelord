@@ -153,7 +153,7 @@ async fn multi_connection_merges_events() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn backpressure_drops_events_and_counts() {
+async fn backpressure_preserves_every_event() {
     let (factory, handles) = tracked_channel_factory();
 
     let mut cfg = testkit::config::pool(10, 500);
@@ -181,11 +181,7 @@ async fn backpressure_drops_events_and_counts() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let stats = pool.stats();
-    assert!(
-        stats.events_dropped > 0,
-        "Expected events_dropped > 0, got {}",
-        stats.events_dropped
-    );
+    assert_eq!(stats.events_dropped, 0);
 
     let mut read = 0;
     while let Ok(Some(_)) =
@@ -193,7 +189,7 @@ async fn backpressure_drops_events_and_counts() {
     {
         read += 1;
     }
-    assert!(read > 0, "Should have drained at least some events");
+    assert_eq!(read, 20, "All events must reach the consumer");
     assert!(
         read + stats.events_dropped as usize >= 20,
         "read ({read}) + dropped ({}) should account for all 20 events",

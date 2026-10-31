@@ -72,6 +72,17 @@ pub(crate) async fn prepare_markets(
         registry.add(market);
     }
 
+    append_verified_groups(config, &mut registry)?;
+    for relation in &config.strategies.verified_relations {
+        for id in relation.market_ids() {
+            if registry.get_by_market_id(id).is_none() {
+                return Err(crate::error::Error::Parse(format!(
+                    "Verified relation references undiscovered market {id}"
+                )));
+            }
+        }
+    }
+
     info!(
         markets_fetched,
         markets_parsed,
@@ -102,11 +113,8 @@ pub(crate) async fn prepare_markets(
         })
         .collect();
 
-    let token_ids: Vec<TokenId> = registry
-        .markets()
-        .iter()
-        .flat_map(|m| m.outcomes().iter().map(|o| o.token_id().clone()))
-        .collect();
+    let mut token_ids: Vec<TokenId> = registry.all_token_ids().cloned().collect();
+    token_ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
 
     info!(tokens = token_ids.len(), "Subscribing to tokens");
 
@@ -120,4 +128,97 @@ pub(crate) async fn prepare_markets(
         token_ids,
         market_summaries,
     }))
+}
+
+fn append_verified_groups(config: &Config, registry: &mut MarketRegistry) -> Result<()> {
+    for (index, group) in config.strategies.exhaustive_groups.iter().enumerate() {
+        if group.len() > config.strategies.market_rebalancing.max_outcomes {
+            return Err(crate::error::Error::Parse(
+                "Exhaustive group exceeds max_outcomes".into(),
+            ));
+        }
+        let unique: std::collections::HashSet<_> = group.iter().collect();
+        if group.len() < 3 || group.len() != unique.len() {
+            return Err(crate::error::Error::Parse(
+                "Exhaustive groups require at least three distinct condition IDs".into(),
+            ));
+        }
+        let mut outcomes = Vec::new();
+        for id in group {
+            let market = registry.get_by_market_id(id).ok_or_else(|| {
+                crate::error::Error::Parse(format!(
+                    "Incomplete exhaustive group: missing {id}; increase discovery limit"
+                ))
+            })?;
+            if !market.is_binary() {
+                return Err(crate::error::Error::Parse(
+                    "Group member must be binary".into(),
+                ));
+            }
+            outcomes.push(crate::domain::market::Outcome::new(
+                market.outcomes()[0].token_id().clone(),
+                market.question(),
+            ));
+        }
+        let tokens: std::collections::HashSet<_> = outcomes.iter().map(|o| o.token_id()).collect();
+        if tokens.len() != outcomes.len() {
+            return Err(crate::error::Error::Parse(
+                "Exhaustive group repeats an outcome token".into(),
+            ));
+        }
+        registry.add(crate::domain::market::Market::new(
+            crate::domain::id::MarketId::new(format!("verified-event-{index}")),
+            format!("Operator-verified exhaustive group {index}"),
+            outcomes,
+            rust_decimal::Decimal::ONE,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{
+        id::MarketId,
+        market::{Market, Outcome},
+    };
+    use rust_decimal::Decimal;
+    #[test]
+    fn complete_groups_preserve_binary_detection_and_missing_members_fail() {
+        let mut config = Config::default();
+        config.strategies.exhaustive_groups = vec![vec![
+            MarketId::new("a"),
+            MarketId::new("b"),
+            MarketId::new("c"),
+        ]];
+        let mut registry = MarketRegistry::new();
+        for name in ["a", "b"] {
+            registry.add(Market::new(
+                MarketId::new(name),
+                name,
+                vec![
+                    Outcome::new(TokenId::new(format!("{name}-yes")), "Yes"),
+                    Outcome::new(TokenId::new(format!("{name}-no")), "No"),
+                ],
+                Decimal::ONE,
+            ));
+        }
+        assert!(append_verified_groups(&config, &mut registry).is_err());
+        registry.add(Market::new(
+            MarketId::new("c"),
+            "c",
+            vec![
+                Outcome::new(TokenId::new("c-yes"), "Yes"),
+                Outcome::new(TokenId::new("c-no"), "No"),
+            ],
+            Decimal::ONE,
+        ));
+        append_verified_groups(&config, &mut registry).unwrap();
+        let token = TokenId::new("a-yes");
+        let affected: Vec<_> = registry.get_all_by_token(&token).collect();
+        assert_eq!(affected.len(), 2);
+        assert!(affected.iter().any(|m| m.outcome_count() == 2));
+        assert!(affected.iter().any(|m| m.outcome_count() == 3));
+    }
 }

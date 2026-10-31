@@ -38,6 +38,7 @@ pub fn bregman_divergence(mu: &[Decimal], theta: &[Decimal]) -> Decimal {
     let epsilon = Decimal::new(1, 10); // 1e-10 for numerical stability
 
     for (m, t) in mu.iter().zip(theta.iter()) {
+        divergence += *t - *m;
         if *m > epsilon && *t > epsilon {
             // μ * ln(μ/θ) = μ * (ln(μ) - ln(θ))
             let m_f64 = m.to_f64().unwrap_or(0.0);
@@ -81,7 +82,7 @@ pub fn bregman_gradient(mu: &[Decimal], theta: &[Decimal]) -> Vec<Decimal> {
             let t_f64 = t_safe.to_f64().unwrap_or(1.0);
 
             // ln(μ/θ) + 1 = ln(μ) - ln(θ) + 1
-            let grad = m_f64.ln() - t_f64.ln() + 1.0;
+            let grad = m_f64.ln() - t_f64.ln();
             Decimal::try_from(grad).unwrap_or(Decimal::ZERO)
         })
         .collect()
@@ -198,10 +199,7 @@ mod tests {
 
         // At same point, gradient should be [1, 1] (ln(1) + 1 = 1)
         for g in &grad {
-            assert!(
-                (*g - Decimal::ONE).abs() < dec!(0.01),
-                "Gradient at same point should be ~1"
-            );
+            assert!(g.abs() < dec!(0.01), "Gradient at same point should be ~0");
         }
     }
 

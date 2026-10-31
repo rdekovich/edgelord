@@ -6,11 +6,10 @@
 use std::sync::Arc;
 
 use tokio::time::{timeout, Duration};
-use tracing::{error, info, warn};
+use tracing::error;
 
 use super::position::{record_partial_position, record_position};
 use crate::application::state::AppState;
-use crate::domain::id::OrderId;
 use crate::domain::opportunity::Opportunity;
 use crate::domain::stats::{TradeLeg, TradeOpenEvent};
 use crate::domain::trade::TradeResult;
@@ -30,17 +29,27 @@ struct ExecutionLockGuard {
     state: Arc<AppState>,
     /// Market ID whose lock is held.
     market_id: String,
+    completed: bool,
 }
 
 impl ExecutionLockGuard {
     /// Create a new guard (assumes lock is already held).
     fn new(state: Arc<AppState>, market_id: String) -> Self {
-        Self { state, market_id }
+        Self {
+            state,
+            market_id,
+            completed: false,
+        }
     }
 }
 
 impl Drop for ExecutionLockGuard {
     fn drop(&mut self) {
+        if !self.completed {
+            self.state.require_reconciliation(
+                "Execution interrupted; reconcile durable intent before resuming",
+            );
+        }
         self.state.release_execution(&self.market_id);
     }
 }
@@ -49,8 +58,8 @@ impl Drop for ExecutionLockGuard {
 ///
 /// Executes the opportunity in a background task, handling all outcomes:
 /// - Success: Records position and updates exposure tracking
-/// - Partial fill: Attempts cancellation, records partial position if needed
-/// - Failure/timeout: Releases reserved exposure
+/// - Partial fill: Records actual inventory and halts for reconciliation
+/// - Confirmed failure: Releases reserved exposure; timeout/unknown: retains it
 ///
 /// Sends execution result notifications regardless of outcome.
 pub(crate) fn spawn_execution(
@@ -62,133 +71,87 @@ pub(crate) fn spawn_execution(
     opportunity_id: Option<i32>,
 ) {
     let market_id = opportunity.market_id().to_string();
-
     tokio::spawn(async move {
-        let _lock_guard = ExecutionLockGuard::new(Arc::clone(&state), market_id.clone());
-        // Calculate reserved exposure for release
+        let mut lock_guard = ExecutionLockGuard::new(Arc::clone(&state), market_id.clone());
         let reserved_exposure = opportunity.total_cost() * opportunity.volume();
-
-        // Get configurable timeout from state (with test override)
+        let intent_id = uuid::Uuid::new_v4().to_string();
+        if let Err(error) = state.record_intent(&intent_id, &opportunity) {
+            state.require_reconciliation(format!("Cannot persist execution intent: {error}"));
+            state.release_exposure(reserved_exposure);
+            return;
+        }
         #[cfg(test)]
         let execution_timeout = Duration::from_millis(100);
         #[cfg(not(test))]
         let execution_timeout = Duration::from_secs(state.risk_limits().execution_timeout_secs);
+        match timeout(execution_timeout, executor.execute_arbitrage(&opportunity)).await {
+            Ok(Ok(result)) => {
+                if !result.is_consistent_with(&opportunity) {
+                    state.require_reconciliation(
+                        "Invalid execution quantities; reservation retained",
+                    );
+                    return;
+                }
 
-        let result = timeout(execution_timeout, executor.execute_arbitrage(&opportunity)).await;
-
-        match result {
-            Ok(exec_result) => match exec_result {
-                Ok(exec_result) => {
-                    match &exec_result {
-                        TradeResult::Success { fills: _ } => {
-                            // Record trade open first to get trade_id
-                            let trade_id = if let Some(opp_id) = opportunity_id {
-                                let legs: Vec<TradeLeg> = opportunity
-                                    .legs()
-                                    .iter()
-                                    .map(|leg| TradeLeg {
-                                        token_id: leg.token_id().to_string(),
-                                        side: "buy".to_string(),
-                                        price: leg.ask_price(),
-                                        size: opportunity.volume(),
-                                    })
-                                    .collect();
-
-                                stats.record_trade_open(&TradeOpenEvent {
-                                    opportunity_id: opp_id,
-                                    strategy: opportunity.strategy().to_string(),
-                                    market_ids: vec![market_id.clone()],
-                                    legs,
-                                    size: opportunity.volume(),
-                                    expected_profit: opportunity.expected_profit(),
-                                })
-                            } else {
-                                None
-                            };
-
-                            // Record position with trade_id for close tracking
-                            record_position(&state, &opportunity, trade_id);
-
-                            // Release reserved exposure (now converted to actual position exposure)
-                            state.release_exposure(reserved_exposure);
-
-                            // Track peak exposure
-                            let exposure = state.total_exposure();
-                            stats.update_peak_exposure(exposure);
-                        }
-                        TradeResult::Partial { fills, failures } => {
-                            let fill_ids: Vec<_> =
-                                fills.iter().map(|f| f.token_id.to_string()).collect();
-                            let failure_ids: Vec<_> =
-                                failures.iter().map(|f| f.token_id.to_string()).collect();
-                            warn!(
-                                fills = ?fill_ids,
-                                failures = ?failure_ids,
-                                "Partial fill detected, attempting recovery"
-                            );
-
-                            // Try to cancel all filled orders
-                            let mut cancel_failed = false;
-                            for fill in fills.iter() {
-                                let order_id = OrderId::new(fill.order_id.clone());
-                                if let Err(cancel_err) =
-                                    ArbitrageExecutor::cancel(executor.as_ref(), &order_id).await
-                                {
-                                    warn!(error = %cancel_err, token = %fill.token_id, "Failed to cancel filled leg");
-                                    cancel_failed = true;
-                                }
-                            }
-
-                            if cancel_failed {
-                                warn!("Some cancellations failed, recording partial position");
-                                record_partial_position(
-                                    &state,
-                                    &opportunity,
-                                    fills,
-                                    failures,
-                                    None,
-                                );
-                                // Release reserved exposure (partial position recorded)
-                                state.release_exposure(reserved_exposure);
-                            } else {
-                                info!(
-                                    "Successfully cancelled all filled legs, no position recorded"
-                                );
-                                // Release reserved exposure (no position recorded)
-                                state.release_exposure(reserved_exposure);
-                            }
-                        }
-                        TradeResult::Failed { .. } => {
-                            // Release reserved exposure on failure
-                            state.release_exposure(reserved_exposure);
-                        }
+                let fills = result.fills();
+                let trade_id = opportunity_id.filter(|_| !fills.is_empty()).and_then(|id| {
+                    stats.record_trade_open(&TradeOpenEvent {
+                        opportunity_id: id,
+                        strategy: opportunity.strategy().into(),
+                        market_ids: vec![market_id.clone()],
+                        legs: fills
+                            .iter()
+                            .map(|fill| TradeLeg {
+                                token_id: fill.token_id.to_string(),
+                                side: "buy".into(),
+                                price: fill.price,
+                                size: fill.amount,
+                            })
+                            .collect(),
+                        size: opportunity.volume(),
+                        expected_profit: opportunity.expected_profit(),
+                    })
+                });
+                if let Err(error) = state.record_execution_result(&intent_id, &result, trade_id) {
+                    state.require_reconciliation(format!(
+                        "Cannot persist execution result: {error}; reconcile orders"
+                    ));
+                    return; // Intent remains durable, reservation remains held.
+                }
+                match &result {
+                    TradeResult::Success { fills } => {
+                        record_position(&state, &opportunity, fills, trade_id);
                     }
-
-                    // Notify execution result
-                    notifiers.notify_all(Event::ExecutionCompleted(ExecutionEvent::from_result(
-                        &market_id,
-                        &exec_result,
-                    )));
+                    TradeResult::Partial { fills, failures } => {
+                        // Cancellation does not undo a fill. Keep all confirmed inventory.
+                        record_partial_position(&state, &opportunity, fills, failures, trade_id);
+                        state.require_reconciliation(
+                            "Partial execution; reconcile or hedge inventory before resuming",
+                        );
+                    }
+                    TradeResult::Failed { .. } => {}
                 }
-                Err(e) => {
-                    error!(error = %e, "Execution failed");
-                    // Release reserved exposure on error
-                    state.release_exposure(reserved_exposure);
-                    notifiers.notify_all(Event::ExecutionCompleted(ExecutionEvent {
-                        market_id,
-                        success: false,
-                        details: e.to_string(),
-                    }));
-                }
-            },
-            Err(_) => {
-                error!(market_id = %market_id, "Execution timed out");
-                // Release reserved exposure on timeout
                 state.release_exposure(reserved_exposure);
+                lock_guard.completed = true;
+                stats.update_peak_exposure(state.total_exposure());
+                notifiers.notify_all(Event::ExecutionCompleted(ExecutionEvent::from_result(
+                    &market_id, &result,
+                )));
+            }
+            ambiguous => {
+                let reason = match ambiguous {
+                    Ok(Err(error)) => error.to_string(),
+                    Err(_) => "execution_timeout".into(),
+                    _ => unreachable!(),
+                };
+                error!(%market_id, %reason, "Execution outcome unknown; reservation retained");
+                state.require_reconciliation(format!(
+                    "Unknown execution outcome: {reason}; reconcile before resuming"
+                ));
                 notifiers.notify_all(Event::ExecutionCompleted(ExecutionEvent {
                     market_id,
                     success: false,
-                    details: "execution_timeout".to_string(),
+                    details: reason,
                 }));
             }
         }
@@ -229,8 +192,18 @@ mod tests {
         ) -> Result<TradeResult, Error> {
             Ok(TradeResult::Partial {
                 fills: vec![
-                    Fill::new(TokenId::from("token-1"), "order-1"),
-                    Fill::new(TokenId::from("token-2"), "order-2"),
+                    Fill::new(
+                        TokenId::from("token-1"),
+                        "order-1",
+                        rust_decimal::Decimal::from(100),
+                        rust_decimal::Decimal::new(40, 2),
+                    ),
+                    Fill::new(
+                        TokenId::from("token-2"),
+                        "order-2",
+                        rust_decimal::Decimal::from(100),
+                        rust_decimal::Decimal::new(45, 2),
+                    ),
                 ],
                 failures: vec![Failure::new(TokenId::from("token-3"), "execution failed")],
             })
@@ -277,7 +250,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn partial_fill_triggers_cancel_and_records_partial_position_on_failure() {
+    async fn partial_fill_is_recorded_regardless_of_cancel_capability() {
         let executor = Arc::new(MockPartialFillExecutor {
             cancel_fail_order_ids: vec!["order-1".to_string()],
         });
@@ -383,6 +356,7 @@ mod tests {
         let stats = in_memory_stats_recorder();
 
         assert!(state.try_lock_execution("timeout-market"));
+        assert!(state.try_reserve_exposure(dec!(90)));
 
         spawn_execution(executor, opportunity, notifiers, state.clone(), stats, None);
 
@@ -391,6 +365,10 @@ mod tests {
         loop {
             if state.try_lock_execution("timeout-market") {
                 state.release_execution("timeout-market");
+                assert_eq!(state.pending_exposure(), dec!(90));
+                assert!(state.is_circuit_breaker_active());
+                state.reset_circuit_breaker();
+                assert!(state.is_circuit_breaker_active());
                 break;
             }
             if start.elapsed() > timeout {

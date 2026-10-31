@@ -30,6 +30,9 @@
 //! infrastructure/  Runtime concerns (caching, config, orchestration)
 //! ```
 
+// async_trait adds #[must_use] to already-must-use boxed futures.
+#![allow(clippy::double_must_use)]
+
 pub mod adapter;
 pub mod application;
 pub mod domain;

@@ -60,6 +60,12 @@ impl PolymarketDeduplicator {
                 // Add order book depth for additional uniqueness
                 key.push_str(&format!(":d{}:{}", book.bids().len(), book.asks().len()));
 
+                for level in book.bids() {
+                    key.push_str(&format!(":bid{}@{}", level.size(), level.price()));
+                }
+                for level in book.asks() {
+                    key.push_str(&format!(":ask{}@{}", level.size(), level.price()));
+                }
                 Some(key)
             }
             MarketEvent::BookDelta { token_id, book } => {
@@ -76,6 +82,12 @@ impl PolymarketDeduplicator {
                 // Add order book depth for additional uniqueness
                 key.push_str(&format!(":d{}:{}", book.bids().len(), book.asks().len()));
 
+                for level in book.bids() {
+                    key.push_str(&format!(":bid{}@{}", level.size(), level.price()));
+                }
+                for level in book.asks() {
+                    key.push_str(&format!(":ask{}@{}", level.size(), level.price()));
+                }
                 Some(key)
             }
             // Connection and settlement events are not deduplicated
@@ -98,6 +110,14 @@ impl MessageDeduplicator for PolymarketDeduplicator {
             return false;
         };
 
+        if let Some(token) = event.token_id() {
+            let snapshot_prefix = format!("snap:{}:", token.as_str());
+            let delta_prefix = format!("delta:{}:", token.as_str());
+            self.cache.retain(|old, _| {
+                old == &key
+                    || (!old.starts_with(&snapshot_prefix) && !old.starts_with(&delta_prefix))
+            });
+        }
         let now = Instant::now();
 
         // Check if we've seen this key before
@@ -139,7 +159,7 @@ impl MessageDeduplicator for PolymarketDeduplicator {
                 .collect();
 
             // Sort by age (oldest first)
-            entries.sort_by(|a, b| a.1.cmp(&b.1));
+            entries.sort_by_key(|entry| entry.1);
 
             // Remove oldest entries until we're under the limit
             let to_remove = entries.len().saturating_sub(self.max_entries);
@@ -258,7 +278,7 @@ mod tests {
 
         assert!(!dedup.is_duplicate(&event1));
         assert!(!dedup.is_duplicate(&event2));
-        assert_eq!(dedup.cache_size(), 2);
+        assert_eq!(dedup.cache_size(), 1);
     }
 
     #[test]
@@ -270,7 +290,7 @@ mod tests {
 
         assert!(!dedup.is_duplicate(&snapshot));
         assert!(!dedup.is_duplicate(&delta));
-        assert_eq!(dedup.cache_size(), 2);
+        assert_eq!(dedup.cache_size(), 1);
     }
 
     #[test]

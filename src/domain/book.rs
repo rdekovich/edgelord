@@ -81,16 +81,20 @@ pub struct Book {
     bids: Vec<PriceLevel>,
     /// Ask (sell) levels, sorted by price ascending.
     asks: Vec<PriceLevel>,
+    observed_at: std::time::Instant,
+    source_timestamp: Option<i64>,
 }
 
 impl Book {
     /// Creates a new empty order book.
     #[must_use]
-    pub const fn new(token_id: TokenId) -> Self {
+    pub fn new(token_id: TokenId) -> Self {
         Self {
             token_id,
             bids: Vec::new(),
             asks: Vec::new(),
+            observed_at: std::time::Instant::now(),
+            source_timestamp: None,
         }
     }
 
@@ -98,16 +102,34 @@ impl Book {
     ///
     /// Bids should be sorted by price descending, asks by price ascending.
     #[must_use]
-    pub const fn with_levels(
+    pub fn with_levels(
         token_id: TokenId,
-        bids: Vec<PriceLevel>,
-        asks: Vec<PriceLevel>,
+        mut bids: Vec<PriceLevel>,
+        mut asks: Vec<PriceLevel>,
     ) -> Self {
+        bids.retain(|l| l.price > Price::ZERO && l.size > Volume::ZERO);
+        asks.retain(|l| l.price > Price::ZERO && l.size > Volume::ZERO);
+        bids.sort_by_key(|level| std::cmp::Reverse(level.price));
+        asks.sort_by_key(|level| level.price);
         Self {
             token_id,
             bids,
             asks,
+            observed_at: std::time::Instant::now(),
+            source_timestamp: None,
         }
+    }
+
+    /// Source time orders updates across redundant connections.
+    pub fn with_source_timestamp(mut self, timestamp: Option<i64>) -> Self {
+        self.source_timestamp = timestamp;
+        self
+    }
+    pub fn source_timestamp(&self) -> Option<i64> {
+        self.source_timestamp
+    }
+    pub fn is_fresh(&self) -> bool {
+        self.observed_at.elapsed() <= std::time::Duration::from_secs(5)
     }
 
     /// Returns the token ID for this book.

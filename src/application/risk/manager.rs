@@ -158,7 +158,15 @@ impl RiskManager {
             .state
             .positions()
             .open_positions()
-            .filter(|p| p.market_id() == market_id)
+            .filter(|p| {
+                p.market_id() == market_id
+                    || p.legs().iter().any(|held| {
+                        opportunity
+                            .legs()
+                            .iter()
+                            .any(|leg| leg.token_id() == held.token_id())
+                    })
+            })
             .map(Position::entry_cost)
             .sum::<Decimal>();
 

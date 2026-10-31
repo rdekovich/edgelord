@@ -3,8 +3,11 @@
 //! Provides centralized, thread-safe state management for the application
 //! including position tracking, risk limits, and circuit breaker status.
 
-use std::collections::HashSet;
+use crate::domain::{opportunity::Opportunity, trade::TradeResult};
+use crate::port::outbound::journal::{ExecutionJournal, ExecutionRecord};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
 use rust_decimal::Decimal;
@@ -137,6 +140,9 @@ pub struct AppState {
     pending_executions: Mutex<HashSet<String>>,
     /// Reserved exposure from approved but not yet executed opportunities.
     pending_exposure: Mutex<Decimal>,
+    journal: Option<Arc<dyn ExecutionJournal>>,
+    reconciliation_required: AtomicBool,
+    settled_tokens: Mutex<HashMap<crate::domain::id::TokenId, Decimal>>,
 }
 
 impl AppState {
@@ -150,7 +156,193 @@ impl AppState {
             circuit_breaker_reason: RwLock::new(None),
             pending_executions: Mutex::new(HashSet::new()),
             pending_exposure: Mutex::new(Decimal::ZERO),
+            journal: None,
+            reconciliation_required: AtomicBool::new(false),
+            settled_tokens: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Restore confirmed inventory and retain every unresolved intent as exposure.
+    pub fn with_journal(
+        limits: RiskLimits,
+        journal: Arc<dyn ExecutionJournal>,
+    ) -> crate::error::Result<Self> {
+        let mut state = Self::new(limits);
+        let mut pending = HashMap::new();
+        for record in journal.records()? {
+            match record {
+                ExecutionRecord::Account { .. } => {}
+                ExecutionRecord::Settlement { payouts } => {
+                    state.apply_settlement(&payouts)?;
+                }
+                ExecutionRecord::Intent { id, opportunity } => {
+                    if pending.insert(id, opportunity).is_some() {
+                        return Err(crate::error::Error::Parse(
+                            "Duplicate execution intent".into(),
+                        ));
+                    }
+                }
+                ExecutionRecord::Outcome {
+                    id,
+                    result,
+                    trade_id,
+                } => {
+                    let opportunity = pending.remove(&id).ok_or_else(|| {
+                        crate::error::Error::Parse("Execution outcome without intent".into())
+                    })?;
+                    if !result.is_consistent_with(&opportunity) {
+                        return Err(crate::error::Error::Parse(
+                            "Invalid execution result in ledger".into(),
+                        ));
+                    }
+                    match result {
+                        TradeResult::Success { fills } => {
+                            crate::application::orchestration::position::record_position(
+                                &state,
+                                &opportunity,
+                                &fills,
+                                trade_id,
+                            )
+                        }
+                        TradeResult::Partial { fills, failures } => {
+                            crate::application::orchestration::position::record_partial_position(
+                                &state,
+                                &opportunity,
+                                &fills,
+                                &failures,
+                                trade_id,
+                            );
+                            state.require_reconciliation("Restored partial execution");
+                        }
+                        TradeResult::Failed { .. } => {}
+                    }
+                }
+            }
+        }
+        for opportunity in pending.values() {
+            *state.pending_exposure.lock() += opportunity.total_cost() * opportunity.volume();
+            state.require_reconciliation("Unresolved durable execution intent");
+        }
+        state.apply_settlement(&[])?;
+        state.journal = Some(journal);
+        Ok(state)
+    }
+
+    /// Prevent using a ledger belonging to a different trading account.
+    pub fn bind_account(&self, identity: &str) -> crate::error::Result<()> {
+        let journal = self.journal.as_ref().ok_or_else(|| {
+            crate::error::Error::Parse("Live execution requires a durable ledger".into())
+        })?;
+        let records = journal.records()?;
+        if records.is_empty() {
+            return journal.append(&ExecutionRecord::Account {
+                identity: identity.into(),
+            });
+        }
+        match records.first() {
+            Some(ExecutionRecord::Account { identity: recorded }) if recorded == identity => Ok(()),
+            _ => Err(crate::error::Error::Parse(
+                "Ledger is unbound or belongs to another account; reconcile before trading".into(),
+            )),
+        }
+    }
+
+    pub(crate) fn record_intent(
+        &self,
+        id: &str,
+        opportunity: &Opportunity,
+    ) -> crate::error::Result<()> {
+        if let Some(journal) = &self.journal {
+            journal.append(&ExecutionRecord::Intent {
+                id: id.into(),
+                opportunity: opportunity.clone(),
+            })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn record_execution_result(
+        &self,
+        id: &str,
+        result: &TradeResult,
+        trade_id: Option<i32>,
+    ) -> crate::error::Result<()> {
+        if let Some(journal) = &self.journal {
+            journal.append(&ExecutionRecord::Outcome {
+                id: id.into(),
+                result: result.clone(),
+                trade_id,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// A normal pause/resume cannot clear uncertainty about funds.
+    pub fn require_reconciliation(&self, reason: impl Into<String>) {
+        self.reconciliation_required.store(true, Ordering::SeqCst);
+        self.activate_circuit_breaker(reason);
+    }
+
+    /// Close only when every held token has an authoritative resolution payout.
+    pub fn settle_tokens(
+        &self,
+        payouts: &[(crate::domain::id::TokenId, Decimal)],
+    ) -> crate::error::Result<Vec<(Option<i32>, Decimal)>> {
+        if payouts
+            .iter()
+            .any(|(_, payout)| *payout < Decimal::ZERO || *payout > Decimal::ONE)
+        {
+            return Err(crate::error::Error::Parse(
+                "Invalid settlement payout".into(),
+            ));
+        }
+        if let Some(journal) = &self.journal {
+            journal.append(&ExecutionRecord::Settlement {
+                payouts: payouts.to_vec(),
+            })?;
+        }
+        self.apply_settlement(payouts)
+    }
+
+    fn apply_settlement(
+        &self,
+        payouts: &[(crate::domain::id::TokenId, Decimal)],
+    ) -> crate::error::Result<Vec<(Option<i32>, Decimal)>> {
+        let mut settled = self.settled_tokens.lock();
+        for (token, payout) in payouts {
+            if settled.get(token).is_some_and(|old| old != payout) {
+                return Err(crate::error::Error::Parse(
+                    "Conflicting settlement; reconcile inventory".into(),
+                ));
+            }
+            settled.insert(token.clone(), *payout);
+        }
+        let mut positions = self.positions.write();
+        let closes: Vec<_> = positions
+            .all()
+            .filter(|p| !p.status().is_closed())
+            .filter_map(|position| {
+                let payout: Option<Decimal> = position
+                    .legs()
+                    .iter()
+                    .map(|leg| settled.get(leg.token_id()).map(|value| *value * leg.size()))
+                    .sum();
+                payout.map(|payout| {
+                    (
+                        position.id(),
+                        position.trade_id(),
+                        payout - position.entry_cost(),
+                    )
+                })
+            })
+            .collect();
+        for (id, _, pnl) in &closes {
+            positions.close(*id, *pnl);
+        }
+        Ok(closes
+            .into_iter()
+            .map(|(_, trade_id, pnl)| (trade_id, pnl))
+            .collect())
     }
 
     /// Acquire read access to the position tracker.
@@ -223,6 +415,9 @@ impl AppState {
 
     /// Deactivate the circuit breaker, resuming normal trading.
     pub fn reset_circuit_breaker(&self) {
+        if self.reconciliation_required.load(Ordering::SeqCst) {
+            return;
+        }
         self.circuit_breaker.store(false, Ordering::SeqCst);
         *self.circuit_breaker_reason.write() = None;
     }
@@ -247,7 +442,11 @@ impl AppState {
     /// Returns `true` if the lock was acquired, `false` if the market
     /// already has an execution in progress.
     pub fn try_lock_execution(&self, market_id: &str) -> bool {
-        self.pending_executions.lock().insert(market_id.to_string())
+        let mut pending = self.pending_executions.lock();
+        if !pending.is_empty() {
+            return false;
+        }
+        pending.insert(market_id.to_string())
     }
 
     /// Release the execution lock for a market.
@@ -435,7 +634,7 @@ mod tests {
         assert!(!state.try_lock_execution("market-1"));
 
         // Different market should succeed
-        assert!(state.try_lock_execution("market-2"));
+        assert!(!state.try_lock_execution("market-2"));
 
         // After release, can lock again
         state.release_execution("market-1");

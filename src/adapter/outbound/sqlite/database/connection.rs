@@ -53,6 +53,7 @@ pub fn configure_sqlite_connection(conn: &mut SqliteConnection) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::redundant_field_names)] // Diesel-generated QueryableByName impls.
 mod tests {
     use super::*;
 

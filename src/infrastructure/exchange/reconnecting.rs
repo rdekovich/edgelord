@@ -251,8 +251,8 @@ impl<S: MarketDataStream + Send> MarketDataStream for ReconnectingDataStream<S> 
                     warn!(reason = %reason, "Connection lost, will reconnect");
                     self.connected = false;
                     self.record_failure();
-                    // Don't return the disconnected event, just reconnect
-                    continue;
+                    // Invalidate downstream caches before reconnecting.
+                    return Some(MarketEvent::Disconnected { reason });
                 }
                 Some(event) => {
                     // Reset failure count on successful event
@@ -267,7 +267,9 @@ impl<S: MarketDataStream + Send> MarketDataStream for ReconnectingDataStream<S> 
                     warn!("Data stream ended unexpectedly, will reconnect");
                     self.connected = false;
                     self.record_failure();
-                    continue;
+                    return Some(MarketEvent::Disconnected {
+                        reason: "Stream ended".into(),
+                    });
                 }
             }
         }
@@ -337,6 +339,10 @@ mod tests {
             .unwrap();
 
         // First call triggers reconnect, second returns snapshot
+        assert!(matches!(
+            stream.next_event().await,
+            Some(MarketEvent::Disconnected { .. })
+        ));
         let event = stream.next_event().await;
         assert!(matches!(event, Some(MarketEvent::BookSnapshot { .. })));
 
@@ -635,6 +641,10 @@ mod tests {
             .unwrap();
 
         // This should trigger reconnect and resubscribe
+        assert!(matches!(
+            stream.next_event().await,
+            Some(MarketEvent::Disconnected { .. })
+        ));
         let event = stream.next_event().await;
         assert!(matches!(event, Some(MarketEvent::BookSnapshot { .. })));
 
@@ -656,6 +666,10 @@ mod tests {
         stream.consecutive_failures = 2;
 
         // Get event (triggers reconnect)
+        assert!(matches!(
+            stream.next_event().await,
+            Some(MarketEvent::Disconnected { .. })
+        ));
         let event = stream.next_event().await;
         assert!(matches!(event, Some(MarketEvent::BookSnapshot { .. })));
 

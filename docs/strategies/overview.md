@@ -1,10 +1,13 @@
 # Strategy Guide
 
+Implementation scope: single-condition buys YES+NO; rebalancing buys an operator-verified exhaustive group; combinatorial enumerates equal-quantity YES/NO baskets over 2–8 binary markets. The live path uses guaranteed resolution payouts and executable asks, not Frank–Wolfe distance. Relationship inference is advisory. Mathematical payoff coverage does not guarantee that every leg fills or that profitable opportunities exist. See [configuration](../configuration.md#strategies) and [testing](../testing.md).
+
+
 ## What is Prediction Market Arbitrage?
 
-Prediction markets price uncertain events as tradeable contracts. Each contract pays a fixed amount (typically $1) if its associated outcome occurs. In a well-functioning market, the prices of all mutually exclusive outcomes should sum to the payout value—this reflects the fundamental constraint that exactly one outcome must occur.
+Prediction markets price uncertain events as tradeable contracts. Each contract pays a fixed amount (typically $1) if its associated outcome occurs. In a well-functioning market, the prices of all mutually exclusive and exhaustive outcomes should sum to the payout value—this reflects the fundamental constraint that exactly one outcome must occur.
 
-When prices temporarily deviate from this constraint, arbitrage opportunities emerge. By simultaneously purchasing all outcomes for less than the guaranteed payout, a trader locks in risk-free profit regardless of which outcome actually occurs.
+When prices temporarily deviate from this constraint, arbitrage opportunities emerge. If every required leg fills below the minimum settlement payout, the basket has a positive gross payoff under the assumed resolution rules. Orders are submitted separately; execution and resolution risks remain.
 
 ## The Fundamental Arbitrage Condition
 
@@ -16,7 +19,7 @@ $$\sum_{i=1}^{n} P(O_i) = \text{payout}$$
 **Arbitrage opportunity exists when:**
 $$\sum_{i=1}^{n} \text{ask}_i < \text{payout}$$
 
-The **edge** represents the guaranteed profit per unit:
+The **edge** represents the gross payoff margin per basket, conditional on full execution:
 $$\text{edge} = \text{payout} - \sum_{i=1}^{n} \text{ask}_i$$
 
 ## Why Do Arbitrage Opportunities Exist?
@@ -42,9 +45,7 @@ Edgelord implements three strategies that detect different types of arbitrage op
 
 ## Strategy Selection
 
-**Start simple**: Enable `single_condition` and `market_rebalancing` first. These strategies have straightforward detection logic and well-understood risk profiles.
-
-**Graduate to combinatorial**: The combinatorial strategy requires additional infrastructure (inference engine, cluster detection) and careful tuning. Add it once baseline strategies are operationally stable.
+Configure each strategy explicitly. Multi-market strategies require reviewed resolution groups or constraints; the inference engine is optional and cannot authorize execution. See [configuration](../configuration.md#strategies).
 
 ## Shared Risk Considerations
 

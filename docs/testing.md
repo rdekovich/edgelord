@@ -1,60 +1,26 @@
 # Testing
 
-## Quick Start
+Use Rust 1.93+, CMake, a C++ compiler and libclang. On Debian/Ubuntu, install `cmake libclang-dev build-essential`; on macOS install CMake and LLVM and set `LIBCLANG_PATH` to LLVM's `lib` directory when needed.
 
-```console
-$ cargo test                              # Unit tests (offline)
-$ cargo test --features polymarket        # Include Polymarket tests
-$ cargo test --features telegram          # Include Telegram tests
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features
+bash tools/check-architecture.sh
+python3 scripts/test-release.py
+cargo package --locked
 ```
 
-## Test Categories
+`tests/review_correctness.rs` reproduces the original five correctness failures. `tests/trading_correctness_tests.rs` checks all three strategy payoff guarantees against allowed resolution states, actual-cost ledger replay, settlement losses, account binding, unresolved execution recovery, malformed fills, real local WebSocket transport and separation of inferred versus verified relationships. Adapter tests reject unconfirmed order responses as fills. SQLite tests verify replay cannot double-count closing profit.
 
-| Category | Features | Requires |
-|----------|----------|----------|
-| Unit tests | (none) | Nothing |
-| Polymarket unit | `polymarket` | Nothing |
-| Telegram unit | `telegram` | Nothing |
-| LLM integration | `integration-tests` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` |
-| Polymarket integration | `polymarket-integration` | `POLYMARKET_PRIVATE_KEY` |
-| Telegram integration | `telegram-integration` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` |
+The release-script tests use fake archives and transport, verify all four formula targets, and prove a bad checksum cannot replace an existing installation. They do not establish that remote release artifacts have been published.
 
-## Running Integration Tests
+Read-only public REST and WebSocket smoke tests are opt-in:
 
-Integration tests hit real APIs and require credentials:
-
-```console
-$ export ANTHROPIC_API_KEY="sk-..."
-$ export OPENAI_API_KEY="sk-..."
-$ cargo test --features integration-tests
+```sh
+EDGELORD_SMOKE=1 cargo test --locked --test polymarket_live_smoke_tests -- --ignored --nocapture
 ```
 
-Or run all tests including integration:
+These tests submit no orders and require no wallet. Authenticated API, LLM and Telegram tests are separately ignored and may require credentials or create external effects. Do not indiscriminately run all ignored tests. Release CI runs deterministic all-feature tests, not credentialed tests; `--all-features` alone does not run ignored tests.
 
-```console
-$ cargo test --all-features
-```
-
-## CI Behavior
-
-- **Every push/PR**: Unit tests only (`polymarket,telegram` features)
-- **Release tags**: Full integration tests with API credentials
-
-## Writing Tests
-
-- Place unit tests in `#[cfg(test)] mod tests` within the source file
-- Use `#[cfg(feature = "integration-tests")]` for tests requiring real APIs
-- Use in-memory SQLite (`:memory:`) for database tests
-- Mock external HTTP calls in unit tests
-
-## Coverage by Layer
-
-| Layer | Tests | Coverage |
-|-------|-------|----------|
-| Domain | ~90 | Core types, invariants |
-| Port | ~20 | Trait contracts |
-| Application | ~150 | Strategies, solvers |
-| Adapter | ~550 | CLI, LLM, Telegram, Polymarket, SQLite |
-| Infrastructure | ~300 | Factories, pools, reconnection |
-
-Total: ~1100 tests
+Passing tests establishes the documented bounded behavior, not profitability, throughput under arbitrary load, or live end-to-end order execution. The automated suite does not validate funded execution or redemption. Before unattended use, validate a reviewed market universe and a separately authorized, bounded-capital trial including confirmed fills, a rejected leg, restart reconciliation and actual settlement/redemption.

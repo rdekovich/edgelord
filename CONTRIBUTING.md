@@ -2,24 +2,24 @@
 
 ## Setup
 
-[Rust](https://rustup.rs/) is required to build edgelord.
+[Rust](https://rustup.rs/) 1.93+, CMake, a C++ compiler and libclang are required on Linux or macOS. See [testing](docs/testing.md) for platform prerequisites and the complete acceptance commands.
 
 ```console
-$ git clone https://github.com/usealtoal/edgelord
+$ git clone https://github.com/rdekovich/edgelord
 $ cd edgelord
-$ cargo build
+$ cargo build --locked
 ```
 
 ## Testing
 
 ```console
-$ cargo test
+$ cargo test --locked --all-features
 ```
 
 ## Code Style
 
 - `cargo fmt` before committing
-- `cargo clippy -- -D warnings` must pass
+- `cargo clippy --locked --all-targets --all-features -- -D warnings` must pass
 - Doc comments on all public items
 - Follow existing patterns in the codebase
 
@@ -61,7 +61,7 @@ docs(readme): update installation instructions
 
 ## Reporting Issues
 
-Use [GitHub Issues](https://github.com/usealtoal/edgelord/issues). Include:
+Use [GitHub Issues](https://github.com/rdekovich/edgelord/issues). Include:
 
 - edgelord version (`edgelord --version`)
 - OS and architecture

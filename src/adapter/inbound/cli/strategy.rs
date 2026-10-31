@@ -37,17 +37,17 @@ pub fn list() -> Result<()> {
                 {
                     "name": STRATEGY_SINGLE_CONDITION,
                     "signal": "YES + NO < $1",
-                    "typical_edge": "2-5%",
+                    "typical_edge": "not guaranteed",
                 },
                 {
                     "name": STRATEGY_MARKET_REBALANCING,
                     "signal": "sum(outcomes) < $1",
-                    "typical_edge": "1-3%",
+                    "typical_edge": "not guaranteed",
                 },
                 {
                     "name": STRATEGY_COMBINATORIAL,
                     "signal": "cross-market constraints",
-                    "typical_edge": "<1%",
+                    "typical_edge": "not guaranteed",
                 },
             ],
         }));
@@ -61,17 +61,17 @@ pub fn list() -> Result<()> {
         StrategyRow {
             name: STRATEGY_SINGLE_CONDITION,
             signal: "YES + NO < $1",
-            edge: "2-5%",
+            edge: "not guaranteed",
         },
         StrategyRow {
             name: STRATEGY_MARKET_REBALANCING,
             signal: "sum(outcomes) < $1",
-            edge: "1-3%",
+            edge: "not guaranteed",
         },
         StrategyRow {
             name: STRATEGY_COMBINATORIAL,
             signal: "cross-market constraints",
-            edge: "<1%",
+            edge: "not guaranteed",
         },
     ];
 
@@ -111,7 +111,7 @@ pub fn explain(name: &str) -> Result<()> {
             STRATEGY_COMBINATORIAL => json!({
                 "command": "strategies.explain",
                 "strategy": STRATEGY_COMBINATORIAL,
-                "summary": "Detects cross-market opportunities using inferred constraints and optimization",
+                "summary": "Detects cross-market opportunities using operator-verified constraints and bounded YES/NO basket enumeration",
                 "config_path": "strategies.combinatorial",
             }),
             _ => json!({
@@ -172,6 +172,9 @@ fn explain_market_rebalancing() {
         "Detects arbitrage in multi-outcome markets where:
 sum(all outcome prices) < $1.00 payout
 
+Requires reviewed strategies.exhaustive_groups: every condition must be
+mutually exclusive AND exhaustive, with exactly one $1 YES winner.
+
 Example (3-outcome market):
   Option A @ $0.30 + Option B @ $0.35 + Option C @ $0.32 = $0.97
   Payout = $1.00
@@ -186,21 +189,24 @@ Configuration:
 fn explain_combinatorial() {
     output::section(STRATEGY_COMBINATORIAL);
     output::lines(
-        "Detects arbitrage across related markets using:
-- LLM inference to identify market relationships
-- LP/ILP optimization to find profitable combinations
+        "Enumerates equal-quantity YES/NO baskets across 2-8 binary $1 markets.
+A basket must cost less than its minimum payout over every allowed resolution.
 
-Example:
-  Market A: \"Will X happen in 2024?\"
-  Market B: \"Will X happen in Q4 2024?\"
-  Constraint: B implies A
+Example: if A implies B, NO(A) + YES(B) pays at least $1.
 
-Requires:
-  [inference]
-  provider = \"anthropic\"  # or \"openai\"
+Requires operator-reviewed strategies.verified_relations; LLM guesses cannot
+permit trades. Configure real condition IDs and verify resolution rules.
 
 Configuration:
+  [strategies]
+  enabled = [\"combinatorial\"]
+  [[strategies.verified_relations]]
+  type = \"implies\"
+  if_yes = \"condition-a\"
+  then_yes = \"condition-b\"
   [strategies.combinatorial]
-  min_edge = 0.02",
+  gap_threshold = 0.02
+
+Each leg is FOK; a multi-leg basket is not atomic.",
     );
 }

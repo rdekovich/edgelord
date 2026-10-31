@@ -29,13 +29,18 @@
 //! # }
 //! ```
 
+use crate::domain::book::{Book, PriceLevel};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
+use std::collections::{HashMap, VecDeque};
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, error, info, trace, warn};
 
-use super::dto::message::{PolymarketBookMessage, PolymarketSubscribeMessage, PolymarketWsMessage};
+#[cfg(test)]
+use super::dto::message::PolymarketBookMessage;
+use super::dto::message::{PolymarketSubscribeMessage, PolymarketWsMessage};
 use crate::domain::id::TokenId;
 use crate::error::Result;
 use crate::port::{outbound::exchange::MarketDataStream, outbound::exchange::MarketEvent};
@@ -236,7 +241,9 @@ pub struct PolymarketDataStream {
     url: String,
     ws: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     /// Buffer for pending book messages when multiple arrive in one frame.
-    pending_books: Vec<PolymarketBookMessage>,
+    pending_events: VecDeque<MarketEvent>,
+    books: HashMap<TokenId, Book>,
+    next_ping: tokio::time::Instant,
 }
 
 impl PolymarketDataStream {
@@ -246,7 +253,86 @@ impl PolymarketDataStream {
         Self {
             url,
             ws: None,
-            pending_books: Vec::new(),
+            pending_events: VecDeque::new(),
+            books: HashMap::new(),
+            next_ping: tokio::time::Instant::now(),
+        }
+    }
+    fn ingest(&mut self, message: PolymarketWsMessage) {
+        match message {
+            PolymarketWsMessage::Books(books) => {
+                for book in books {
+                    self.ingest(PolymarketWsMessage::Book(book));
+                }
+            }
+            PolymarketWsMessage::Book(message) => {
+                let book = message.to_orderbook();
+                let token_id = book.token_id().clone();
+                if self.books.get(&token_id).is_some_and(|old| matches!((old.source_timestamp(), book.source_timestamp()), (Some(a), Some(b)) if b < a)) { return; }
+                self.books.insert(token_id.clone(), book.clone());
+                self.pending_events
+                    .push_back(MarketEvent::BookSnapshot { token_id, book });
+            }
+            PolymarketWsMessage::PriceChanges(changes) => {
+                let timestamp = changes.timestamp.as_deref().and_then(|v| v.parse().ok());
+                for change in changes.price_changes {
+                    let token_id = TokenId::new(change.asset_id);
+                    // Deltas are unusable until this connection has a complete snapshot.
+                    let Some(old) = self.books.get(&token_id) else {
+                        continue;
+                    };
+                    if change.price <= rust_decimal::Decimal::ZERO
+                        || change.size < rust_decimal::Decimal::ZERO
+                    {
+                        self.books.remove(&token_id);
+                        self.pending_events.push_back(MarketEvent::Disconnected {
+                            reason: "Invalid price change; resynchronization required".into(),
+                        });
+                        continue;
+                    }
+                    if matches!((old.source_timestamp(), timestamp), (Some(a), Some(b)) if b < a) {
+                        continue;
+                    }
+                    let mut bids = old.bids().to_vec();
+                    let mut asks = old.asks().to_vec();
+                    let levels = match change.side.as_str() {
+                        "BUY" => &mut bids,
+                        "SELL" => &mut asks,
+                        _ => continue,
+                    };
+                    levels.retain(|level| level.price() != change.price);
+                    if change.size > rust_decimal::Decimal::ZERO {
+                        levels.push(PriceLevel::new(change.price, change.size));
+                    }
+                    let book = Book::with_levels(token_id.clone(), bids, asks)
+                        .with_source_timestamp(timestamp);
+                    self.books.insert(token_id.clone(), book.clone());
+                    self.pending_events
+                        .push_back(MarketEvent::BookDelta { token_id, book });
+                }
+            }
+            PolymarketWsMessage::Lifecycle(
+                super::dto::message::PolymarketLifecycle::Resolved {
+                    market,
+                    winning_asset_id,
+                },
+            ) => {
+                self.pending_events.push_back(MarketEvent::MarketSettled {
+                    market_id: crate::domain::id::MarketId::new(market),
+                    winning_outcome: winning_asset_id,
+                    payout_per_share: rust_decimal::Decimal::ONE,
+                });
+            }
+            PolymarketWsMessage::Unknown(value) => {
+                if matches!(
+                    value.get("event_type").and_then(|v| v.as_str()),
+                    Some("book" | "price_change" | "market_resolved")
+                ) {
+                    self.pending_events.push_back(MarketEvent::Disconnected {
+                        reason: "Malformed market event; resynchronization required".into(),
+                    });
+                }
+            }
         }
     }
 }
@@ -258,6 +344,9 @@ impl MarketDataStream for PolymarketDataStream {
         let (ws_stream, response) = connect_async(&self.url).await?;
         info!(status = %response.status(), "WebSocket connected");
         self.ws = Some(ws_stream);
+        self.books.clear();
+        self.pending_events.clear();
+        self.next_ping = tokio::time::Instant::now();
         Ok(())
     }
 
@@ -284,66 +373,51 @@ impl MarketDataStream for PolymarketDataStream {
     }
 
     async fn next_event(&mut self) -> Option<MarketEvent> {
-        // First, check if we have pending books from a previous message
-        if let Some(book) = self.pending_books.pop() {
-            let order_book = book.to_orderbook();
-            let token_id = TokenId::from(book.asset_id);
-            return Some(MarketEvent::BookSnapshot {
-                token_id,
-                book: order_book,
-            });
-        }
-
-        let ws = self.ws.as_mut()?;
-
         loop {
-            match ws.next().await? {
-                Ok(Message::Text(text)) => {
-                    trace!(bytes = text.len(), "Received WebSocket text frame");
+            if let Some(event) = self.pending_events.pop_front() {
+                return Some(event);
+            }
+            let ws = self.ws.as_mut()?;
+            let message = tokio::select! {
+                message = ws.next() => message,
+                _ = tokio::time::sleep_until(self.next_ping) => {
+                    self.next_ping = tokio::time::Instant::now() + Duration::from_secs(10);
+                    if ws.send(Message::Text("PING".into())).await.is_err() {
+                        return Some(MarketEvent::Disconnected { reason: "Heartbeat send failed".into() });
+                    }
+                    continue;
+                }
+            };
+            match message {
+                Some(Ok(Message::Text(text))) if text == "PONG" => continue,
+                Some(Ok(Message::Text(text))) => {
                     match serde_json::from_str::<PolymarketWsMessage>(&text) {
-                        Ok(PolymarketWsMessage::Books(mut books)) => {
-                            // Store all but the first book for later
-                            if let Some(book) = books.pop() {
-                                // Save remaining books (in reverse order so pop gives correct order)
-                                self.pending_books = books;
-                                let order_book = book.to_orderbook();
-                                let token_id = TokenId::from(book.asset_id);
-                                return Some(MarketEvent::BookSnapshot {
-                                    token_id,
-                                    book: order_book,
-                                });
-                            }
-                            // Empty array, continue
-                            continue;
-                        }
-                        Ok(PolymarketWsMessage::Unknown(_)) => continue,
-                        Err(e) => {
-                            warn!(error = %e, bytes = text.len(), "Failed to parse message");
-                            continue;
+                        Ok(message) => self.ingest(message),
+                        Err(error) => {
+                            return Some(MarketEvent::Disconnected {
+                                reason: format!("Invalid market data: {error}"),
+                            })
                         }
                     }
                 }
-                Ok(Message::Ping(data)) => {
-                    trace!("Received WebSocket ping");
+                Some(Ok(Message::Ping(data))) => {
                     if ws.send(Message::Pong(data)).await.is_err() {
                         return Some(MarketEvent::Disconnected {
-                            reason: "Failed to send pong".into(),
+                            reason: "Pong send failed".into(),
                         });
                     }
                 }
-                Ok(Message::Close(frame)) => {
-                    info!(frame = ?frame, "WebSocket closed by server");
+                Some(Ok(Message::Close(_))) | None => {
                     return Some(MarketEvent::Disconnected {
-                        reason: frame.map(|f| f.reason.to_string()).unwrap_or_default(),
+                        reason: "Market stream closed".into(),
                     });
                 }
-                Ok(_) => continue,
-                Err(e) => {
-                    error!(error = %e, "WebSocket error");
+                Some(Err(error)) => {
                     return Some(MarketEvent::Disconnected {
-                        reason: e.to_string(),
-                    });
+                        reason: error.to_string(),
+                    })
                 }
+                _ => continue,
             }
         }
     }

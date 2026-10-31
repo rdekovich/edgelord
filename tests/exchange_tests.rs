@@ -80,6 +80,10 @@ async fn reconnect_retries_on_subscribe_failure() {
         .await
         .unwrap();
 
+    assert!(matches!(
+        stream.next_event().await,
+        Some(MarketEvent::Disconnected { .. })
+    ));
     let event = stream.next_event().await;
     assert!(matches!(event, Some(MarketEvent::BookSnapshot { .. })));
     assert!(

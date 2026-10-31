@@ -79,7 +79,11 @@ impl BookCache {
     /// broadcasts a [`BookUpdate`] message to all subscribers.
     pub fn update(&self, book: Book) {
         let token_id = book.token_id().clone();
-        self.books.write().insert(token_id.clone(), book);
+        {
+            let mut books = self.books.write();
+            if books.get(&token_id).is_some_and(|old| matches!((old.source_timestamp(), book.source_timestamp()), (Some(a), Some(b)) if b < a)) { return; }
+            books.insert(token_id.clone(), book);
+        }
 
         // Notify subscribers (ignore send errors when no receivers exist)
         if let Some(ref tx) = self.tx {
@@ -92,7 +96,11 @@ impl BookCache {
     /// Returns `None` if no book exists for the given token.
     #[must_use]
     pub fn get(&self, token_id: &TokenId) -> Option<Book> {
-        self.books.read().get(token_id).cloned()
+        self.books
+            .read()
+            .get(token_id)
+            .filter(|book| book.is_fresh())
+            .cloned()
     }
 
     /// Retrieve snapshots of two order books atomically.
@@ -102,7 +110,10 @@ impl BookCache {
     #[must_use]
     pub fn get_pair(&self, token_a: &TokenId, token_b: &TokenId) -> (Option<Book>, Option<Book>) {
         let books = self.books.read();
-        (books.get(token_a).cloned(), books.get(token_b).cloned())
+        (
+            books.get(token_a).filter(|book| book.is_fresh()).cloned(),
+            books.get(token_b).filter(|book| book.is_fresh()).cloned(),
+        )
     }
 
     /// Retrieve snapshots of multiple order books atomically.
@@ -112,7 +123,15 @@ impl BookCache {
     #[must_use]
     pub fn get_many(&self, token_ids: &[TokenId]) -> Vec<Option<Book>> {
         let books = self.books.read();
-        token_ids.iter().map(|id| books.get(id).cloned()).collect()
+        token_ids
+            .iter()
+            .map(|id| books.get(id).filter(|book| book.is_fresh()).cloned())
+            .collect()
+    }
+
+    /// Invalidate all prices after a transport discontinuity.
+    pub fn clear(&self) {
+        self.books.write().clear();
     }
 
     /// Return the number of order books in the cache.

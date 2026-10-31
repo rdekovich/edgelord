@@ -41,7 +41,12 @@ pub(crate) fn setup_cluster_detection(
                     markets = ?opp.markets.iter().map(|m| m.as_str()).collect::<Vec<_>>(),
                     "Cluster opportunity detected"
                 );
-                let event = Event::OpportunityDetected(OpportunityEvent::from(&opp.opportunity));
+                let mut candidate = OpportunityEvent::from(&opp.opportunity);
+                candidate.question = format!(
+                    "Unverified relationship candidate (not executable): {}",
+                    candidate.question
+                );
+                let event = Event::OpportunityDetected(candidate);
                 notifiers.notify_all(event);
             }
         });

@@ -1,30 +1,8 @@
-//! Combinatorial arbitrage detection using Frank-Wolfe projection.
+//! Bounded combinatorial arbitrage using executable YES/NO baskets.
 //!
-//! Detects arbitrage opportunities across correlated markets where logical
-//! dependencies create exploitable mispricings. For example, if markets A
-//! and B are mutually exclusive, their combined probability cannot exceed 1.
-//!
-//! # Algorithm
-//!
-//! The Frank-Wolfe algorithm projects market prices onto the arbitrage-free
-//! manifold (marginal polytope) using Bregman divergence:
-//!
-//! 1. Start with current market prices theta
-//! 2. Compute gradient of Bregman divergence
-//! 3. Solve ILP oracle to find the minimizing vertex
-//! 4. Update toward that vertex with step size
-//! 5. Repeat until convergence or iteration limit
-//!
-//! The gap between theta and the projection mu* indicates arbitrage potential.
-//!
-//! # Research Background
-//!
-//! Implements techniques from:
-//! - "Arbitrage-Free Combinatorial Market Making via Integer Programming" (2016)
-//! - "Unravelling the Probabilistic Forest: Arbitrage in Prediction Markets" (2025)
-//!
-//! While combinatorial arbitrage captured only 0.24% ($95K) of historical profits,
-//! the mathematical infrastructure enables sophisticated cross-market strategies.
+//! Enumerates resolution scenarios for operator-verified clusters of 2–8
+//! binary markets. Minimum payout is compared with real ask cost and liquidity.
+//! Retained projection APIs are research infrastructure, not trade sizing.
 
 use std::sync::Arc;
 
@@ -44,12 +22,11 @@ use crate::port::{
 /// Configuration for the combinatorial arbitrage strategy.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CombinatorialConfig {
-    /// Maximum Frank-Wolfe iterations per detection cycle.
+    /// Legacy research solver iteration setting (not used for execution).
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
 
-    /// Convergence tolerance for the duality gap.
-    /// Detection stops early when gap falls below this value.
+    /// Legacy research solver tolerance (not used for execution).
     #[serde(default = "default_tolerance")]
     pub tolerance: Decimal,
 
@@ -91,17 +68,16 @@ impl Default for CombinatorialConfig {
     }
 }
 
-/// Combinatorial arbitrage strategy using Frank-Wolfe projection.
+/// Combinatorial arbitrage strategy using bounded basket enumeration.
 ///
-/// Detects cross-market arbitrage by projecting prices onto the marginal
-/// polytope defined by market relation constraints.
+/// Checks basket payoffs against all resolutions allowed by verified constraints.
 ///
 /// # Requirements
 ///
 /// This strategy requires several components to function:
-/// 1. Cluster cache with discovered market relations
+/// 1. Cluster cache with operator-verified market relations
 /// 2. Market registry for resolving market metadata
-/// 3. Projection solver for running the Frank-Wolfe algorithm
+/// 3. Projection solver retained by the research API (unused by basket detection)
 ///
 /// Without these dependencies configured, the strategy returns no opportunities.
 pub struct CombinatorialStrategy {
@@ -113,7 +89,7 @@ pub struct CombinatorialStrategy {
     cluster_cache: Option<Arc<ClusterCache>>,
     /// Market registry for resolving market IDs (injected).
     registry: Option<Arc<MarketRegistry>>,
-    /// Cluster detector for running Frank-Wolfe detection.
+    /// Cluster detector for enumerating executable baskets.
     detector: Option<ClusterDetector>,
     /// Projection solver implementation (injected from infrastructure).
     projection_solver: Option<Arc<dyn ProjectionSolver>>,
@@ -190,14 +166,6 @@ impl CombinatorialStrategy {
         ));
     }
 
-    /// Check if a market has known relations in the cluster cache.
-    fn has_cached_relations(&self, market_id: &crate::domain::id::MarketId) -> bool {
-        self.cluster_cache
-            .as_ref()
-            .map(|c| c.has_relations(market_id))
-            .unwrap_or(false)
-    }
-
     /// Return the current configuration.
     #[must_use]
     pub const fn config(&self) -> &CombinatorialConfig {
@@ -217,22 +185,7 @@ impl Strategy for CombinatorialStrategy {
     }
 
     fn applies_to(&self, ctx: &MarketContext) -> bool {
-        // Only applies to markets with known dependencies
-        // Check both static context and dynamic cache
-        if !self.config.enabled {
-            return false;
-        }
-
-        // If context says it has dependencies, trust that
-        if ctx.has_dependencies {
-            return true;
-        }
-
-        // Otherwise check cache for any correlated markets
-        ctx.correlated_markets
-            .first()
-            .map(|m| self.has_cached_relations(m))
-            .unwrap_or(false)
+        self.config.enabled && (ctx.is_binary() || ctx.has_dependencies)
     }
 
     fn detect(&self, ctx: &dyn DetectionContext) -> Vec<Opportunity> {
@@ -364,7 +317,7 @@ mod tests {
         let strategy = CombinatorialStrategy::new(config);
 
         // Should not apply to markets without dependencies
-        assert!(!strategy.applies_to(&MarketContext::binary()));
+        assert!(strategy.applies_to(&MarketContext::binary()));
         assert!(!strategy.applies_to(&MarketContext::multi_outcome(3)));
 
         // Should apply to markets with dependencies

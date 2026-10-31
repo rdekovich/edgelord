@@ -15,26 +15,30 @@ use crate::domain::trade::{Failure, Fill};
 ///
 /// Creates a new position from the opportunity with all legs filled,
 /// generating a unique position ID and adding it to the tracker.
-pub(crate) fn record_position(state: &AppState, opportunity: &Opportunity, trade_id: Option<i32>) {
-    let position_legs: Vec<PositionLeg> = opportunity
-        .legs()
+pub(crate) fn record_position(
+    state: &AppState,
+    opportunity: &Opportunity,
+    fills: &[Fill],
+    trade_id: Option<i32>,
+) {
+    let position_legs: Vec<PositionLeg> = fills
         .iter()
-        .map(|leg| {
-            PositionLeg::new(
-                leg.token_id().clone(),
-                opportunity.volume(),
-                leg.ask_price(),
-            )
-        })
+        .map(|fill| PositionLeg::new(fill.token_id.clone(), fill.amount, fill.price))
         .collect();
+    let entry_cost: Decimal = position_legs.iter().map(PositionLeg::cost).sum();
+    let volume = fills
+        .iter()
+        .map(|f| f.amount)
+        .min()
+        .unwrap_or(Decimal::ZERO);
 
     let mut positions = state.positions_mut();
     let mut position = Position::new(
         positions.next_id(),
         opportunity.market_id().clone(),
         position_legs,
-        opportunity.total_cost() * opportunity.volume(),
-        opportunity.payout() * opportunity.volume(),
+        entry_cost,
+        opportunity.payout() * volume,
         chrono::Utc::now(),
         PositionStatus::Open,
     );
@@ -61,17 +65,9 @@ pub(crate) fn record_partial_position(
     let filled_token_ids: Vec<TokenId> = fills.iter().map(|f| f.token_id.clone()).collect();
     let missing_token_ids: Vec<TokenId> = failures.iter().map(|f| f.token_id.clone()).collect();
 
-    let position_legs: Vec<PositionLeg> = opportunity
-        .legs()
+    let position_legs: Vec<PositionLeg> = fills
         .iter()
-        .filter(|leg| filled_token_ids.contains(leg.token_id()))
-        .map(|leg| {
-            PositionLeg::new(
-                leg.token_id().clone(),
-                opportunity.volume(),
-                leg.ask_price(),
-            )
-        })
+        .map(|fill| PositionLeg::new(fill.token_id.clone(), fill.amount, fill.price))
         .collect();
 
     let entry_cost: Decimal = position_legs
@@ -85,7 +81,7 @@ pub(crate) fn record_partial_position(
         opportunity.market_id().clone(),
         position_legs,
         entry_cost,
-        opportunity.payout() * opportunity.volume(),
+        Decimal::ZERO,
         chrono::Utc::now(),
         PositionStatus::PartialFill {
             filled: filled_token_ids,

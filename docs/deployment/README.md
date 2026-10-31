@@ -1,6 +1,6 @@
 # Deployment Guide
 
-This section covers production deployment and operations for edgelord.
+This section describes deployment prerequisites and current execution limits. The corrected implementation has deterministic and read-only live verification; funded execution and unattended operation have not been validated.
 
 ## Guides
 
@@ -15,6 +15,11 @@ This section covers production deployment and operations for edgelord.
 - Wallet available through private key or keystore
 - `edgelord check health --config <path>` returns healthy
 - `edgelord check live --config <path>` returns no blockers
+- Reviewed exhaustive groups/relations for enabled multi-market strategies
+- Dedicated EOA account with holdings and open orders reconciled to the execution journal
+- Fee-free immediate-execution contracts and a separately validated bounded-capital trial
+
+Health/readiness commands alone do not establish these conditions. Read [execution and recovery limits](operations.md#execution-and-recovery-limits) before disabling dry-run.
 
 ## Regulatory and Compliance Note
 

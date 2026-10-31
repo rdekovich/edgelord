@@ -25,8 +25,8 @@
 //! // Successful trade
 //! let result = TradeResult::Success {
 //!     fills: vec![
-//!         Fill::new(TokenId::new("yes"), "order-1"),
-//!         Fill::new(TokenId::new("no"), "order-2"),
+//!         Fill::new(TokenId::new("yes"), "order-1", rust_decimal::Decimal::from(100), rust_decimal::Decimal::new(45, 2)),
+//!         Fill::new(TokenId::new("no"), "order-2", rust_decimal::Decimal::from(100), rust_decimal::Decimal::new(45, 2)),
 //!     ],
 //! };
 //!
@@ -35,7 +35,7 @@
 //!
 //! // Partial fill (risk exposure)
 //! let partial = TradeResult::Partial {
-//!     fills: vec![Fill::new(TokenId::new("yes"), "order-1")],
+//!     fills: vec![Fill::new(TokenId::new("yes"), "order-1", rust_decimal::Decimal::from(100), rust_decimal::Decimal::new(45, 2))],
 //!     failures: vec![Failure::new(TokenId::new("no"), "insufficient liquidity")],
 //! };
 //!
@@ -43,24 +43,37 @@
 //! ```
 
 use super::id::TokenId;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
 /// A successfully executed leg in a multi-leg trade.
 ///
 /// Contains the token ID and exchange-assigned order ID for tracking.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fill {
     /// Token ID of the filled outcome.
     pub token_id: TokenId,
     /// Order ID assigned by the exchange.
     pub order_id: String,
+    /// Confirmed quantity acquired.
+    pub amount: Decimal,
+    /// Actual average execution price.
+    pub price: Decimal,
 }
 
 impl Fill {
     /// Creates a new fill record.
-    pub fn new(token_id: TokenId, order_id: impl Into<String>) -> Self {
+    pub fn new(
+        token_id: TokenId,
+        order_id: impl Into<String>,
+        amount: Decimal,
+        price: Decimal,
+    ) -> Self {
         Self {
             token_id,
             order_id: order_id.into(),
+            amount,
+            price,
         }
     }
 }
@@ -68,7 +81,7 @@ impl Fill {
 /// A failed leg in a multi-leg trade.
 ///
 /// Contains the token ID and error message describing the failure.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Failure {
     /// Token ID of the outcome that failed to fill.
     pub token_id: TokenId,
@@ -90,7 +103,7 @@ impl Failure {
 ///
 /// Captures the outcome of attempting to fill all legs of an arbitrage trade.
 /// Partial fills create risk exposure that may need to be hedged or unwound.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TradeResult {
     /// All legs executed successfully, arbitrage position established.
     Success {
@@ -112,6 +125,30 @@ pub enum TradeResult {
 }
 
 impl TradeResult {
+    /// Validate exchange results before changing inventory or replaying a ledger.
+    pub fn is_consistent_with(&self, opportunity: &super::opportunity::Opportunity) -> bool {
+        let mut tokens = std::collections::HashSet::new();
+        let valid = self.fills().iter().all(|fill| {
+            tokens.insert(fill.token_id.clone())
+                && !fill.order_id.is_empty()
+                && fill.amount > Decimal::ZERO
+                && fill.amount <= opportunity.volume()
+                && opportunity.legs().iter().any(|leg| {
+                    leg.token_id() == &fill.token_id
+                        && fill.price > Decimal::ZERO
+                        && fill.price <= leg.ask_price()
+                })
+        });
+        valid
+            && (!self.is_success()
+                || (self.fills().len() == opportunity.legs().len()
+                    && self
+                        .fills()
+                        .iter()
+                        .all(|fill| fill.amount == opportunity.volume())))
+            && (!self.is_partial() || !self.fills().is_empty())
+    }
+
     /// Returns true if all legs were successfully filled.
     #[must_use]
     pub const fn is_success(&self) -> bool {
@@ -157,7 +194,12 @@ mod tests {
 
     #[test]
     fn fill_new() {
-        let fill = Fill::new(TokenId::from("token-1"), "order-1");
+        let fill = Fill::new(
+            TokenId::from("token-1"),
+            "order-1",
+            rust_decimal::Decimal::from(100),
+            rust_decimal::Decimal::new(45, 2),
+        );
         assert_eq!(fill.token_id.as_str(), "token-1");
         assert_eq!(fill.order_id, "order-1");
     }
@@ -172,7 +214,12 @@ mod tests {
     #[test]
     fn result_success() {
         let result = TradeResult::Success {
-            fills: vec![Fill::new(TokenId::from("t1"), "o1")],
+            fills: vec![Fill::new(
+                TokenId::from("t1"),
+                "o1",
+                rust_decimal::Decimal::from(100),
+                rust_decimal::Decimal::new(45, 2),
+            )],
         };
         assert!(result.is_success());
         assert!(!result.is_partial());
@@ -184,7 +231,12 @@ mod tests {
     #[test]
     fn result_partial() {
         let result = TradeResult::Partial {
-            fills: vec![Fill::new(TokenId::from("t1"), "o1")],
+            fills: vec![Fill::new(
+                TokenId::from("t1"),
+                "o1",
+                rust_decimal::Decimal::from(100),
+                rust_decimal::Decimal::new(45, 2),
+            )],
             failures: vec![Failure::new(TokenId::from("t2"), "error")],
         };
         assert!(!result.is_success());

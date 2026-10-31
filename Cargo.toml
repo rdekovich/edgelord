@@ -2,11 +2,11 @@
 name = "edgelord"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.93"
 description = "A prediction market arbitrage detection and execution CLI."
 authors = ["Rob Dekovich <rob@altoal.com>"]
-repository = "https://github.com/usealtoal/edgelord"
-homepage = "https://github.com/usealtoal/edgelord"
+repository = "https://github.com/rdekovich/edgelord"
+homepage = "https://github.com/rdekovich/edgelord"
 documentation = "https://docs.rs/edgelord"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
@@ -21,7 +21,7 @@ path = "src/main.rs"
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/edgelord-{ target }.tar.gz"
 pkg-fmt = "tgz"
-bin-dir = "edgelord-{ target }/edgelord{ binary-ext }"
+bin-dir = "edgelord{ binary-ext }"
 
 [features]
 default = ["polymarket", "telegram"]

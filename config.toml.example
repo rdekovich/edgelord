@@ -14,7 +14,7 @@ profile = "local"
 
 # Dry-run mode: detect opportunities but don't execute trades
 # Useful for testing and validating configuration
-dry_run = false
+dry_run = true
 
 # Path to SQLite database for stats and persistence
 database = "edgelord.db"
@@ -35,11 +35,12 @@ exchange = "polymarket"
 [exchange_config]
 type = "polymarket"
 # Environment: "testnet" or "mainnet"
-# IMPORTANT: Use testnet for testing, mainnet for real trading
-environment = "testnet"
+# Public market data comes from mainnet; dry_run=true prevents order submission.
+# Live execution supports only Polygon chain 137, not an Amoy paper exchange.
+environment = "mainnet"
 
 # Chain ID: 80002 (Amoy testnet) or 137 (Polygon mainnet)
-chain_id = 80002
+chain_id = 137
 
 # WebSocket URL for market data (usually don't need to change)
 ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -111,7 +112,9 @@ format = "pretty"
 
 [strategies]
 # Which strategies to enable (list of names)
-enabled = ["single_condition", "market_rebalancing"]
+enabled = ["single_condition"]
+# To enable all three, add market_rebalancing and combinatorial, then configure
+# exhaustive_groups and verified_relations. See docs/configuration.md.
 
 # Single-condition: YES + NO < $1 in binary markets
 [strategies.single_condition]
@@ -124,13 +127,12 @@ min_edge = 0.03                     # Minimum edge (3%)
 min_profit = 1.00                   # Minimum profit ($1.00)
 max_outcomes = 10                   # Skip markets with more outcomes
 
-# Combinatorial: cross-market arbitrage via Frank-Wolfe + ILP
-# NOTE: Requires dependency configuration (not yet implemented)
+# Combinatorial: bounded YES/NO basket enumeration against verified relations
 [strategies.combinatorial]
 enabled = false                     # Disabled by default
-max_iterations = 20                 # Frank-Wolfe iterations
-tolerance = 0.0001                  # Convergence threshold
-gap_threshold = 0.02                # Minimum gap to trade (2%)
+max_iterations = 20                 # Legacy research solver setting (not execution)
+tolerance = 0.0001                  # Legacy research solver setting (not execution)
+gap_threshold = 0.02                # Minimum guaranteed payout minus basket cost
 
 # =============================================================================
 # RISK MANAGEMENT

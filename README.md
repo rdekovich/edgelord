@@ -7,68 +7,58 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/usealtoal/edgelord/actions"><img src="https://github.com/usealtoal/edgelord/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/rdekovich/edgelord/actions"><img src="https://github.com/rdekovich/edgelord/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://crates.io/crates/edgelord"><img src="https://img.shields.io/crates/v/edgelord.svg" alt="Crates.io"></a>
-  <a href="https://github.com/usealtoal/edgelord/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License"></a>
+  <a href="https://github.com/rdekovich/edgelord/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License"></a>
 </p>
 
 ---
 
-> I built this to test arbitrage conditions on Polymarket, but it doubled as an experiment in pure hexagonal architecture. The three strategies *do* work (the combinatorial solver uses Frank-Wolfe, which has been [proven effective](https://arxiv.org/abs/2508.03474) for this). Arbitrage is hard (latency, liquidity, market selection all matter), but the math is sound. Run this against 1,000+ markets concurrently and you'll find opportunities. If you're curious about the mechanics, I wrote up [how each strategy works](docs/strategies/overview.md). If this makes you money, just know the real edge is that I wrote it.
+> Edgelord detects and executes bounded arbitrage baskets. All three strategies have deterministic payoff tests; this is not a claim of profitability or unattended live readiness. Execution currently supports fee-free, immediate-execution binary $1 contracts on Polygon with an EOA wallet. Multi-market strategies require operator-reviewed resolution relationships. See [testing and verification limits](docs/testing.md) before enabling trading.
 
 ---
 
 ## Highlights
 
 - **Real-time arbitrage detection** across binary and multi-outcome markets
-- **Three strategies** out of the box: single-condition, market rebalancing, combinatorial
-- **LLM-powered inference** for cross-market constraint discovery
+- **Three strategies** with explicit market-group configuration: single-condition, market rebalancing, combinatorial
+- **LLM-powered inference** for relationship candidates; candidates cannot authorize trades
 - **Risk management** with position limits, exposure caps, and circuit breakers
 - **Telegram notifications** for trades, opportunities, and alerts
-- **SQLite persistence** for statistics, trades, and historical analysis
+- **Durable execution journal** for restart recovery, plus SQLite reporting
 
 ## Installation
 
-With the standalone installer:
+The correctness changes in this checkout are not yet published. To use this version, build this checkout on Linux or macOS with Rust 1.93+, CMake, a C++ compiler, and libclang:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/usealtoal/edgelord/main/scripts/install.sh | sh
+cargo install --locked --path .
 ```
 
-With [Homebrew](https://brew.sh):
+Homebrew is hosted in this repository. Once these changes are merged:
 
 ```bash
-brew install usealtoal/tap/edgelord
+brew tap rdekovich/edgelord https://github.com/rdekovich/edgelord.git
+brew install --HEAD rdekovich/edgelord/edgelord
 ```
 
-With [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) (pre-built binary):
-
-```bash
-cargo binstall edgelord
-```
-
-Or build from source with [cargo](https://doc.rust-lang.org/cargo/) (requires cmake and C++ compiler):
-
-```bash
-cargo install edgelord
-```
+The initial formula builds from source. After a new release and its formula update are merged, omit `--HEAD` to install the release binary. See [release and installation operations](docs/deployment/operations.md#releasing-and-installing) for crates.io, cargo-binstall, and checksum-verified standalone installation. Existing published versions do **not** contain this remediation.
 
 ## Quick Start
 
 ```console
-$ edgelord init
-$ edgelord check config
-$ edgelord check live
-$ edgelord run
+$ cp config.toml.example config.toml
+$ edgelord check config --config config.toml
+$ edgelord run --config config.toml --dry-run
 ```
 
 ## Strategies
 
-| Strategy | Signal | Typical Edge |
-|----------|--------|--------------|
-| `single_condition` | YES + NO < $1 | 2–5% |
-| `market_rebalancing` | sum(outcomes) < $1 | 1–3% |
-| `combinatorial` | cross-market constraints | <1% |
+| Strategy | Executable basket | Required assumption |
+|----------|-------------------|---------------------|
+| `single_condition` | Buy YES + NO below $1 | One binary condition |
+| `market_rebalancing` | Buy every YES below $1 | Reviewed, exclusive **and exhaustive** group |
+| `combinatorial` | Enumerate YES/NO baskets against all allowed resolutions | Reviewed constraints; 2–8 binary markets |
 
 ```console
 $ edgelord strategies list
@@ -79,7 +69,7 @@ $ edgelord strategies explain single_condition
 
 ```console
 $ edgelord init                  # Setup wizard
-$ edgelord run                   # Start trading
+$ edgelord run --dry-run         # Detect without submitting orders
 $ edgelord status                # Current state and today's P&L
 $ edgelord statistics today      # Today's statistics
 $ edgelord statistics week       # 7-day summary
@@ -96,26 +86,18 @@ See `edgelord --help` for all commands.
 Create a config file with `edgelord init` or manually:
 
 ```toml
-[exchange]
-provider = "polymarket"
-network = "polygon"
+dry_run = true
+exchange = "polymarket"
+database = "edgelord.db"
 
-[wallet]
-private_key_env = "PRIVATE_KEY"
+[strategies]
+enabled = ["single_condition"]
 
 [risk]
 max_position_per_market = 100
-max_total_exposure = 1000
+max_total_exposure = 500
 min_profit_threshold = 0.50
-
-[strategies.single_condition]
-enabled = true
-min_edge = 0.05
-
-[telegram]
-enabled = true
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-chat_id_env = "TELEGRAM_CHAT_ID"
+max_slippage = 0.02
 ```
 
 See [docs/configuration.md](docs/configuration.md) for full reference.

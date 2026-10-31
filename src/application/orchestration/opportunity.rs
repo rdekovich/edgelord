@@ -24,7 +24,7 @@ use crate::port::outbound::notifier::{Event, OpportunityEvent, RiskEvent};
 /// 4. Either spawn execution (live mode) or log (dry-run mode)
 ///
 /// Releases locks and reserved exposure on all exit paths.
-pub(crate) fn handle_opportunity(opp: Opportunity, context: OpportunityHandlingContext<'_>) {
+pub(crate) fn handle_opportunity(mut opp: Opportunity, context: OpportunityHandlingContext<'_>) {
     let OpportunityHandlingContext {
         executor,
         risk_manager,
@@ -37,6 +37,41 @@ pub(crate) fn handle_opportunity(opp: Opportunity, context: OpportunityHandlingC
 
     if !state.try_lock_execution(opp.market_id().as_str()) {
         debug!(market_id = %opp.market_id(), "Execution already in progress, skipping");
+        return;
+    }
+
+    let limits = state.risk_limits();
+    let held: rust_decimal::Decimal = state
+        .positions()
+        .open_positions()
+        .filter(|position| {
+            position.market_id() == opp.market_id()
+                || position.legs().iter().any(|held| {
+                    opp.legs()
+                        .iter()
+                        .any(|leg| held.token_id() == leg.token_id())
+                })
+        })
+        .map(|p| p.entry_cost())
+        .sum();
+    let budget = (limits.max_position_per_market - held)
+        .min(limits.max_total_exposure - state.total_exposure() - state.pending_exposure());
+    if opp.total_cost() <= rust_decimal::Decimal::ZERO || budget <= rust_decimal::Decimal::ZERO {
+        state.release_execution(opp.market_id().as_str());
+        return;
+    }
+    opp.set_volume(
+        opp.volume()
+            .min(budget / opp.total_cost())
+            .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero),
+    );
+    if opp.volume() <= rust_decimal::Decimal::ZERO {
+        state.release_execution(opp.market_id().as_str());
+        return;
+    }
+
+    if get_max_slippage(&opp, cache).is_none() {
+        state.release_execution(opp.market_id().as_str());
         return;
     }
 

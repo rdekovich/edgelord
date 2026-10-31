@@ -311,6 +311,12 @@ pub trait MarketParser: Send + Sync {
                 .find(|outcome| self.is_negative_outcome(&outcome.name));
 
             if let (Some(pos), Some(neg)) = (positive, negative) {
+                if pos.token_id.is_empty()
+                    || neg.token_id.is_empty()
+                    || pos.token_id == neg.token_id
+                {
+                    continue;
+                }
                 let outcomes = vec![
                     Outcome::new(TokenId::from(pos.token_id.clone()), positive_name),
                     Outcome::new(TokenId::from(neg.token_id.clone()), negative_name),
@@ -536,6 +542,29 @@ impl MarketDataStream for Box<dyn MarketDataStream> {
 /// rejections.
 #[async_trait]
 pub trait ArbitrageExecutor: Send + Sync {
+    /// Authoritative token payouts for markets that resolved while disconnected.
+    async fn settlement_payouts(
+        &self,
+        _positions: &[crate::domain::position::Position],
+    ) -> Result<Vec<(TokenId, Decimal)>, Error> {
+        Ok(Vec::new())
+    }
+
+    /// Stable chain and signer identity for durable account binding.
+    fn account_identity(&self) -> Option<String> {
+        None
+    }
+
+    /// Verify account inventory against the restored ledger before enabling trading.
+    async fn verify_inventory(
+        &self,
+        _positions: &[crate::domain::position::Position],
+    ) -> Result<(), Error> {
+        Err(Error::Parse(
+            "Executor does not implement account reconciliation".into(),
+        ))
+    }
+
     /// Execute an arbitrage opportunity by placing orders on all legs.
     ///
     /// # Arguments

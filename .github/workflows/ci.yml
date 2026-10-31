@@ -16,25 +16,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.0
         with:
           components: clippy, rustfmt
+      - run: sudo apt-get update && sudo apt-get install -y cmake libclang-dev
       - uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Check (default features)
-        run: cargo check --all-targets
+        run: cargo check --locked --all-targets
 
       - name: Check (all features)
-        run: cargo check --all-targets --all-features
+        run: cargo check --locked --all-targets --all-features
 
       - name: Clippy (default features)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Clippy (all features)
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Check architecture contracts
         run: bash tools/check-architecture.sh
@@ -44,25 +45,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - run: sudo apt-get update && sudo apt-get install -y cmake libclang-dev
       - uses: Swatinem/rust-cache@v2
 
       - name: Run unit tests
-        run: cargo test --features "polymarket,telegram"
+        run: cargo test --locked --all-features
 
-      - name: Run doc tests
-        run: cargo test --doc --features "polymarket,telegram"
+      - name: Verify installer and formula contracts
+        run: python3 scripts/test-release.py
 
   cli:
     name: CLI Validation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - run: sudo apt-get update && sudo apt-get install -y cmake libclang-dev
       - uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --locked --release
 
       - name: Verify help output (run)
         run: |
@@ -96,31 +99,32 @@ jobs:
     strategy:
       matrix:
         features:
-          - ""  # default features
+          - ""  # no default features
           - "telegram"
           - "polymarket"
           - "polymarket,telegram"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - run: sudo apt-get update && sudo apt-get install -y cmake libclang-dev
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.features }}
 
-      - name: Check (${{ matrix.features || 'default' }})
+      - name: Check (${{ matrix.features || 'none' }})
         run: |
           if [ -z "${{ matrix.features }}" ]; then
-            cargo check --all-targets
+            cargo check --locked --all-targets --no-default-features
           else
-            cargo check --all-targets --features "${{ matrix.features }}"
+            cargo check --locked --all-targets --no-default-features --features "${{ matrix.features }}"
           fi
 
-      - name: Test (${{ matrix.features || 'default' }})
+      - name: Test (${{ matrix.features || 'none' }})
         run: |
           if [ -z "${{ matrix.features }}" ]; then
-            cargo test
+            cargo test --locked --no-default-features
           else
-            cargo test --features "${{ matrix.features }}"
+            cargo test --locked --no-default-features --features "${{ matrix.features }}"
           fi
 
   docs:
@@ -128,11 +132,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - run: sudo apt-get update && sudo apt-get install -y cmake libclang-dev
       - uses: Swatinem/rust-cache@v2
 
       - name: Build docs
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --locked --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
 

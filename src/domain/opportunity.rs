@@ -38,6 +38,7 @@
 //! ```
 
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use std::result::Result;
 
 use super::error::DomainError;
@@ -59,7 +60,7 @@ use super::money::Price;
 /// let leg = OpportunityLeg::new(TokenId::new("yes-token"), dec!(0.45));
 /// assert_eq!(leg.ask_price(), dec!(0.45));
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpportunityLeg {
     /// Token ID of the outcome to purchase.
     token_id: TokenId,
@@ -123,7 +124,7 @@ impl OpportunityLeg {
 ///
 /// assert_eq!(opp.edge(), dec!(0.10)); // 10 cent edge
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Opportunity {
     /// Market ID where the opportunity exists.
     market_id: MarketId,
@@ -226,6 +227,11 @@ impl Opportunity {
             payout,
             strategy: String::new(),
         })
+    }
+
+    /// Resize a basket after liquidity and risk validation.
+    pub fn set_volume(&mut self, volume: Decimal) {
+        self.volume = volume;
     }
 
     /// Returns the strategy name that detected this opportunity.
